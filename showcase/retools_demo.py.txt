@@ -1,0 +1,8 @@
+date1 = Date(int(2025), int(12), int(29))
+direction.direction = 'to'
+date2 = Date(int(2026), int(1), int(1))
+summer_vacation = Period(from_date=Date(year=2025, month=6, date=1), to_date=Date(year=2025, month=8, date=31))
+winter_vacation = Period(from_date=Date(year=2025, month=12, date=20), to_date=Date(year=2026, month=1, date=5))
+profile = Profile(id=UUID('123e4567-e89b-12d3-a456-426614174000'), name='Alice', age=35, height=1.75, member=True, balance=Decimal('1234.50'), born=datetime.date(1990, 5, 12), login=datetime.datetime(2025, 1, 2, 3, 4, 5), alarm=datetime.time(7, 30))
+delivery = Delivery(order_id=42, shipped_at=datetime.datetime(2025, 1, 2, 3, 4, 5), delivered_at=None)
+delivery = Delivery(order_id=43, shipped_at=datetime.datetime(2025, 1, 3, 4, 5, 6), delivered_at=datetime.datetime(2025, 1, 5, 7, 8, 9))
