@@ -19,6 +19,15 @@ class Date:
     month: int
     date: int
 
+m = reclass.match(
+    r"<DATE> is (my|your|his|her) birthday",
+    "2011/01/01 is her birthday",
+)
+if m:
+    birthday = m.get(Date)
+    whos = m.group(1)
+    print(f"{birthday = !r}, {whos = !r}")
+
 @reclass(fields=dict(direction=r"to|down to"))
 @dataclass
 class To:
@@ -27,16 +36,16 @@ class To:
 rx = reclass.compile(r"<DATE> <To> <DATE>")
 m = rx.match("2025-12-29 to 2026/01/01")
 if m:
-    date1 = m.get(Date, 1)
+    date1 = m.get(Date)
     print(f"date1 = Date({type(date1.year).__name__}({date1.year}), {type(date1.month).__name__}({date1.month}), {type(date1.date).__name__}({date1.date}))")
-    direction = m.get(To, 1)
+    direction = m.get(To)
     print(f"{direction.direction = !r}")
     date2 = m.get(Date, 2)
     print(f"date2 = Date({type(date2.year).__name__}({date2.year}), {type(date2.month).__name__}({date2.month}), {type(date2.date).__name__}({date2.date}))")
 
 m = reclass.match(r"<DATE> <To> <DATE>", "2026-01-01 down to 2025/12/29")
 if m:
-    direction = m.get(To, 1)
+    direction = m.get(To)
     print(f"{direction.direction = !r}")
 
 
@@ -56,7 +65,7 @@ m = vacation_rx.match(
     "summer vacation is 2025-06-01 to 2025/08/31 and winter vacation is 2025-12-20 to 2026/01/05"
 )
 if m:
-    summer_vacation = m.get(Period, 1)
+    summer_vacation = m.get(Period)
     winter_vacation = m.get(Period, 2)
     print(f"{summer_vacation = !r}")
     print(f"{winter_vacation = !r}")
@@ -90,12 +99,12 @@ profile_text = (
 )
 m = profile_rx.match(profile_text)
 if m:
-    profile = m.get(Profile, 1)
+    profile = m.get(Profile)
     print(f"{profile = !r}")
 
 
 @reclass(
-    r"order <order_id> shipped <shipped_at>(?: delivered <delivered_at>)?",
+    r"order <order_id> shipped <shipped_at>( delivered <delivered_at>)?",
 )
 @dataclass
 class Delivery:
@@ -107,13 +116,21 @@ class Delivery:
 delivery_rx = reclass.compile(r"<Delivery>")
 m = delivery_rx.match("order 42 shipped 2025-01-02 03:04:05")
 if m:
-    delivery = m.get(Delivery, 1)
-    print(f"{delivery = !r}")
-m = delivery_rx.match("order 43 shipped 2025-01-03 04:05:06 delivered 2025-01-05 07:08:09")
-if m:
-    delivery = m.get(Delivery, 1)
+    delivery = m.get(Delivery)
     print(f"{delivery = !r}")
 
+m = delivery_rx.match("order 43 shipped 2025-01-03 04:05:06 delivered 2025-01-05 07:08:09")
+if m:
+    delivery = m.get(Delivery)
+    print(f"{delivery = !r}")
+
+m = reclass.match(r"<Delivery> is a (?P<condition>good|damaged) (package|furniture)", 'order 44 shipped 2025-01-05 05:06:07 is a good furniture')
+if m:
+    delivery = m.get(Delivery)
+    condition = m.group('condition')
+    thing = m.group(1)
+    named = m.groupdict()
+    print(f"{delivery = !r}, {condition = !r}, {thing = !r}, {named = !r}")
 
 travel = Builder()
 billing = Builder()
@@ -149,7 +166,7 @@ m = travel.match(
     "summer vacation is 2025/06/01 to 2025/08/31",
 )
 if m:
-    trip = m.get(Period, 1)
+    trip = m.get(Period)
     print(f"{trip = !r}")
 
 m = billing.match(
@@ -157,5 +174,11 @@ m = billing.match(
     "summer vacation is 2025-06-01 to 2025-08-31",
 )
 if m:
-    trip = m.get(Period, 1)
+    trip = m.get(Period)
     print(f"{trip = !r}")
+
+text = "Dates: 2025-01-01, 2025/02/02, and 2026-03-03."
+rx = reclass.compile(r"<DATE>")
+matches = rx.finditer(text)
+print(f"finditer matches = {len(matches)}")
+print(f"findall matches = {reclass.findall(r'<DATE>', text)}")

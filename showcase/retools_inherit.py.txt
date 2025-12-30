@@ -3,3 +3,4 @@ point = Point3D(x=1, y=2, z=3)
 pair = Pair(x=1, y=2)
 coordinate = Coordinate(x=1, y=2)
 complex = Complex(x=1, y=2)
+pairs = [Pair(x=1, y=2), Coordinate(x=3, y=4), Point3D(x=5, y=6, z=7), Complex(x=8, y=9)]

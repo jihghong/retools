@@ -41,14 +41,14 @@ class To:
 rx = reclass.compile(r"<DATE> <To> <DATE>")
 m = rx.match("2025-12-29 to 2026/01/01")
 if m:
-    date1 = m.get(Date, 1)
-    direction = m.get(To, 1)
+    date1 = m.get(Date)
+    direction = m.get(To)
     date2 = m.get(Date, 2)
     print(date1, direction, date2)
 
 m = reclass.match(r"<DATE> <To> <DATE>", "2026-01-01 down to 2025/12/29")
 if m:
-    print(m.get(To, 1))
+    print(m.get(To))
 ```
 
 ## Placeholder syntax
@@ -95,7 +95,7 @@ billing.reclass(Date, r"<year>-<month>-<date>")
 
 m = travel.match(r"depart on <Date>", "depart on 2025/06/01")
 if m:
-    print(m.get(Date, 1))
+    print(m.get(Date))
 ```
 
 ## Nested dataclasses
@@ -146,11 +146,11 @@ class Complex(Pair):
 
 m = reclass.match(r"<Pair>", "x=1, y=2")
 if m:
-    print(m.get(Pair, 1))  # Coordinate(...)
+    print(m.get(Pair))  # Coordinate(...)
 
 m = reclass.match(r"<Pair>", "1 + 2 i")
 if m:
-    print(m.get(Pair, 1))  # Complex(...)
+    print(m.get(Pair))  # Complex(...)
 ```
 
 ## Optional segments
@@ -197,3 +197,12 @@ class Date:
 
 `reclass.match(pattern, text, flags=0)` is a convenience that compiles (with
 cache) and matches in one call.
+
+## Match helpers
+
+The match object proxies common `re.Match` helpers:
+
+- `group(n)` for user-defined numeric groups (tokens do not shift numbering).
+- `group("name")` for named groups.
+- `groups()` and `groupdict()` for user groups in the pattern.
+- `start()`, `end()`, `span()`, `expand()`, plus `match`, `re`, `string`.

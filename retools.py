@@ -100,6 +100,38 @@ def _collect_named_groups(patterns: list[str]) -> set[str]:
     return names
 
 
+def _collect_named_groups_in_pattern(pattern: str) -> set[str]:
+    return set(_GROUP_NAME_RE.findall(pattern))
+
+
+def _count_capturing_groups(pattern: str) -> int:
+    count = 0
+    i = 0
+    in_class = False
+    length = len(pattern)
+    while i < length:
+        char = pattern[i]
+        if char == "\\":
+            i += 2
+            continue
+        if char == "[":
+            in_class = True
+            i += 1
+            continue
+        if char == "]" and in_class:
+            in_class = False
+            i += 1
+            continue
+        if not in_class and char == "(":
+            if i + 1 < length and pattern[i + 1] == "?":
+                if pattern.startswith("(?P<", i):
+                    count += 1
+            else:
+                count += 1
+        i += 1
+    return count
+
+
 def _unwrap_type(field_type: Any) -> Any:
     origin = get_origin(field_type)
     if origin is None:
@@ -260,6 +292,72 @@ def _validate_mapping(spec: _Spec, mapping: dict[str, _FieldBinding]) -> None:
         )
 
 
+def _expand_pattern_with_user_groups(
+    pattern: str,
+    registry: "Builder",
+    name_gen: _NameGenerator,
+    occurrences: list["_Occurrence"],
+) -> tuple[str, list[int], list[tuple[str, Any]]]:
+    parts: list[str] = []
+    user_group_map: list[int] = []
+    elements: list[tuple[str, Any]] = []
+    group_count = 0
+    i = 0
+    in_class = False
+    length = len(pattern)
+    while i < length:
+        char = pattern[i]
+        if char == "\\":
+            if i + 1 < length:
+                parts.append(pattern[i : i + 2])
+                i += 2
+                continue
+            parts.append(char)
+            i += 1
+            continue
+        if char == "[":
+            in_class = True
+            parts.append(char)
+            i += 1
+            continue
+        if char == "]" and in_class:
+            in_class = False
+            parts.append(char)
+            i += 1
+            continue
+        if not in_class and char == "<":
+            placeholder = _PLACEHOLDER_RE.match(pattern, i)
+            if placeholder:
+                name = placeholder.group(1)
+                spec = registry._by_token.get(name)
+                if spec is not None:
+                    expanded, variants = _expand_token(
+                        spec, registry, name_gen, occurrences
+                    )
+                    parts.append(f"(?:{expanded})")
+                    group_count += _count_capturing_groups(expanded)
+                    elements.append(("token", variants))
+                    i = placeholder.end()
+                    continue
+        if not in_class and char == "(":
+            if i + 1 < length and pattern[i + 1] == "?":
+                if pattern.startswith("(?P<", i):
+                    group_count += 1
+                    elements.append(("named_group", group_count))
+                parts.append(char)
+                i += 1
+                continue
+            group_count += 1
+            user_group_map.append(group_count)
+            elements.append(("group", group_count))
+            parts.append(char)
+            i += 1
+            continue
+        parts.append(char)
+        i += 1
+    return "".join(parts), user_group_map, elements
+
+
 def _binding_group_names(bindings: dict[str, _FieldBinding]) -> list[str]:
     names: list[str] = []
     for binding in bindings.values():
@@ -324,15 +422,99 @@ def _build_from_bindings(
 
 
 class _ReclassMatch:
-    __slots__ = ("_match", "_occurrences")
+    __slots__ = ("_match", "_occurrences", "_user_group_map", "_user_named_groups")
 
-    def __init__(self, match: re.Match[str], occurrences: list[_Occurrence]) -> None:
+    def __init__(
+        self,
+        match: re.Match[str],
+        occurrences: list[_Occurrence],
+        user_group_map: list[int],
+        user_named_groups: set[str],
+    ) -> None:
         self._match = match
         self._occurrences = occurrences
+        self._user_group_map = user_group_map
+        self._user_named_groups = user_named_groups
 
     @property
     def match(self) -> re.Match[str]:
         return self._match
+
+    def _map_group_index(self, index: int) -> int:
+        if index == 0:
+            return 0
+        if index < 0 or index > len(self._user_group_map):
+            raise IndexError("no such group")
+        return self._user_group_map[index - 1]
+
+    def group(self, *args: Any) -> Any:
+        if not args:
+            return self._match.group(0)
+        if len(args) == 1:
+            arg = args[0]
+            if isinstance(arg, int):
+                return self._match.group(self._map_group_index(arg))
+            return self._match.group(arg)
+        return tuple(self.group(arg) for arg in args)
+
+    def groups(self, default: Any = None) -> tuple[Any, ...]:
+        results: list[Any] = []
+        for actual_index in self._user_group_map:
+            value = self._match.group(actual_index)
+            if value is None:
+                value = default
+            results.append(value)
+        return tuple(results)
+
+    def groupdict(self, default: Any = None) -> dict[str, Any]:
+        raw = self._match.groupdict(default)
+        return {name: raw[name] for name in self._user_named_groups if name in raw}
+
+    def start(self, *args: Any) -> int:
+        return self._match.start(*args)
+
+    def end(self, *args: Any) -> int:
+        return self._match.end(*args)
+
+    def span(self, *args: Any) -> tuple[int, int]:
+        return self._match.span(*args)
+
+    def expand(self, template: str) -> str:
+        return self._match.expand(template)
+
+    @property
+    def re(self) -> re.Pattern[str]:
+        return self._match.re
+
+    @property
+    def string(self) -> str:
+        return self._match.string
+
+    @property
+    def pos(self) -> int:
+        return self._match.pos
+
+    @property
+    def endpos(self) -> int:
+        return self._match.endpos
+
+    @property
+    def lastindex(self) -> int | None:
+        return self._match.lastindex
+
+    @property
+    def lastgroup(self) -> str | None:
+        return self._match.lastgroup
+
+    @property
+    def regs(self) -> tuple[tuple[int, int], ...]:
+        return self._match.regs
+
+    def __getitem__(self, key: int | str) -> Any:
+        return self.group(key)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._match, name)
 
     def get(self, cls: type, index: int = 1) -> Any:
         if index < 1:
@@ -351,15 +533,111 @@ class _ReclassMatch:
 
 
 class _ReclassRegex:
-    def __init__(self, compiled: re.Pattern[str], occurrences: list[_Occurrence]) -> None:
+    def __init__(
+        self,
+        compiled: re.Pattern[str],
+        occurrences: list[_Occurrence],
+        user_group_map: list[int],
+        user_named_groups: set[str],
+        findall_elements: list[tuple[str, Any]],
+    ) -> None:
         self._compiled = compiled
         self._occurrences = occurrences
+        self._user_group_map = user_group_map
+        self._user_named_groups = user_named_groups
+        self._findall_elements = findall_elements
 
     def match(self, text: str) -> _ReclassMatch | None:
         match = self._compiled.match(text)
         if match is None:
             return None
-        return _ReclassMatch(match, self._occurrences)
+        return _ReclassMatch(
+            match,
+            self._occurrences,
+            self._user_group_map,
+            self._user_named_groups,
+        )
+
+    def search(self, text: str) -> _ReclassMatch | None:
+        match = self._compiled.search(text)
+        if match is None:
+            return None
+        return _ReclassMatch(
+            match,
+            self._occurrences,
+            self._user_group_map,
+            self._user_named_groups,
+        )
+
+    def fullmatch(self, text: str) -> _ReclassMatch | None:
+        match = self._compiled.fullmatch(text)
+        if match is None:
+            return None
+        return _ReclassMatch(
+            match,
+            self._occurrences,
+            self._user_group_map,
+            self._user_named_groups,
+        )
+
+    def finditer(self, text: str) -> list[_ReclassMatch]:
+        return [
+            _ReclassMatch(
+                match,
+                self._occurrences,
+                self._user_group_map,
+                self._user_named_groups,
+            )
+            for match in self._compiled.finditer(text)
+        ]
+
+    def findall(self, text: str) -> list[Any]:
+        if not self._findall_elements:
+            return self._compiled.findall(text)
+        results: list[Any] = []
+        for match in self._compiled.finditer(text):
+            values: list[Any] = []
+            for kind, payload in self._findall_elements:
+                if kind == "token":
+                    value = None
+                    for spec, bindings in payload:
+                        value = _build_from_bindings(match, spec, bindings)
+                        if value is not None:
+                            break
+                    values.append(value)
+                    continue
+                value = match.group(payload)
+                values.append(value)
+            if len(values) == 1:
+                results.append(values[0])
+            else:
+                results.append(tuple(values))
+        return results
+
+    def split(self, text: str, maxsplit: int = 0) -> list[str]:
+        return self._compiled.split(text, maxsplit)
+
+    def sub(self, repl: str, text: str, count: int = 0) -> str:
+        return self._compiled.sub(repl, text, count)
+
+    def subn(self, repl: str, text: str, count: int = 0) -> tuple[str, int]:
+        return self._compiled.subn(repl, text, count)
+
+    @property
+    def pattern(self) -> str:
+        return self._compiled.pattern
+
+    @property
+    def flags(self) -> int:
+        return self._compiled.flags
+
+    @property
+    def groups(self) -> int:
+        return self._compiled.groups
+
+    @property
+    def groupindex(self) -> dict[str, int]:
+        return self._compiled.groupindex
 
 
 class Builder:
@@ -487,23 +765,56 @@ class Builder:
         name_gen = _NameGenerator(reserved_names)
         occurrences: list[_Occurrence] = []
 
-        def replace(match: re.Match[str]) -> str:
-            name = match.group(1)
-            spec = self._by_token.get(name)
-            if spec is None:
-                return match.group(0)
-            expanded, _ = _expand_token(spec, self, name_gen, occurrences)
-            return f"(?:{expanded})"
-
-        expanded_pattern = _PLACEHOLDER_RE.sub(replace, pattern)
+        user_named_groups = _collect_named_groups_in_pattern(pattern)
+        expanded_pattern, user_group_map, findall_elements = _expand_pattern_with_user_groups(
+            pattern, self, name_gen, occurrences
+        )
         compiled = re.compile(expanded_pattern, flags)
-        result = _ReclassRegex(compiled=compiled, occurrences=occurrences)
+        result = _ReclassRegex(
+            compiled=compiled,
+            occurrences=occurrences,
+            user_group_map=user_group_map,
+            user_named_groups=user_named_groups,
+            findall_elements=findall_elements,
+        )
         self._cache[cache_key] = result
         return result
 
     def match(self, pattern: str, text: str, flags: int = 0) -> _ReclassMatch | None:
         compiled = self.compile(pattern, flags)
         return compiled.match(text)
+
+    def search(self, pattern: str, text: str, flags: int = 0) -> _ReclassMatch | None:
+        compiled = self.compile(pattern, flags)
+        return compiled.search(text)
+
+    def fullmatch(
+        self, pattern: str, text: str, flags: int = 0
+    ) -> _ReclassMatch | None:
+        compiled = self.compile(pattern, flags)
+        return compiled.fullmatch(text)
+
+    def finditer(self, pattern: str, text: str, flags: int = 0) -> list[_ReclassMatch]:
+        compiled = self.compile(pattern, flags)
+        return compiled.finditer(text)
+
+    def findall(self, pattern: str, text: str, flags: int = 0) -> list[Any]:
+        compiled = self.compile(pattern, flags)
+        return compiled.findall(text)
+
+    def split(self, pattern: str, text: str, maxsplit: int = 0, flags: int = 0) -> list[str]:
+        compiled = self.compile(pattern, flags)
+        return compiled.split(text, maxsplit)
+
+    def sub(self, pattern: str, repl: str, text: str, count: int = 0, flags: int = 0) -> str:
+        compiled = self.compile(pattern, flags)
+        return compiled.sub(repl, text, count)
+
+    def subn(
+        self, pattern: str, repl: str, text: str, count: int = 0, flags: int = 0
+    ) -> tuple[str, int]:
+        compiled = self.compile(pattern, flags)
+        return compiled.subn(repl, text, count)
 
 
 reclass = Builder()
