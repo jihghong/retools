@@ -115,40 +115,47 @@ if m:
     print(f"{delivery = !r}")
 
 
-@dataclass
-class TripDate:
-    year: int
-    month: int
-    date: int
-
-
-@dataclass
-class TripPeriod:
-    from_date: TripDate
-    to_date: TripDate
-
-
 travel = Builder()
 billing = Builder()
 
-travel.reclass(TripDate, r"<year>/<month>/<date>")
-travel.reclass(TripPeriod, r"<from_date> to <to_date>")
+travel.reclass(
+    Date,
+    r"<year>/<month>/<date>",
+    fields=dict(
+        year=r"\d{4}",
+        month=r"\d{2}",
+        date=r"\d{2}",
+    ),
+    token="TRAVEL_DATE",
+)
+travel.reclass(To, fields=dict(direction=r"to|down to"))
+travel.reclass(Period, r"<from_date> <To> <to_date>", token="TRAVEL_PERIOD")
 
-billing.reclass(TripDate, r"<year>-<month>-<date>")
-billing.reclass(TripPeriod, r"<from_date> to <to_date>")
+billing.reclass(
+    Date,
+    r"<year>-<month>-<date>",
+    fields=dict(
+        year=r"\d{4}",
+        month=r"\d{2}",
+        date=r"\d{2}",
+    ),
+    token="BILL_DATE",
+)
+billing.reclass(To, fields=dict(direction=r"to|down to"))
+billing.reclass(Period, r"<from_date> <To> <to_date>", token="BILL_PERIOD")
 
 m = travel.match(
-    r"summer vacation is <TripPeriod>",
+    r"summer vacation is <TRAVEL_PERIOD>",
     "summer vacation is 2025/06/01 to 2025/08/31",
 )
 if m:
-    trip = m.get(TripPeriod, 1)
+    trip = m.get(Period, 1)
     print(f"{trip = !r}")
 
 m = billing.match(
-    r"summer vacation is <TripPeriod>",
+    r"summer vacation is <BILL_PERIOD>",
     "summer vacation is 2025-06-01 to 2025-08-31",
 )
 if m:
-    trip = m.get(TripPeriod, 1)
+    trip = m.get(Period, 1)
     print(f"{trip = !r}")
