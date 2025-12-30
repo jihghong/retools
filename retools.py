@@ -155,11 +155,31 @@ def _expand_token(
     registry: "Builder",
     name_gen: _NameGenerator,
     occurrences: list["_Occurrence"],
-) -> tuple[str, dict[str, _FieldBinding]]:
-    expanded, bindings = _expand_spec(spec, registry, name_gen, occurrences)
-    _validate_mapping(spec, bindings)
-    occurrences.append(_Occurrence(spec=spec, field_bindings=bindings))
-    return expanded, bindings
+) -> tuple[str, list[tuple[_Spec, dict[str, _FieldBinding]]]]:
+    candidates = [
+        candidate
+        for candidate in registry._by_class.values()
+        if issubclass(candidate.cls, spec.cls)
+    ]
+    if not candidates:
+        candidates = [spec]
+    if len(candidates) > 1:
+        candidates.sort(
+            key=lambda candidate: (-len(candidate.cls.mro()), candidate.cls.__name__)
+        )
+    expanded_parts: list[str] = []
+    variants: list[tuple[_Spec, dict[str, _FieldBinding]]] = []
+    for candidate in candidates:
+        candidate_expanded, bindings = _expand_spec(
+            candidate, registry, name_gen, occurrences
+        )
+        _validate_mapping(candidate, bindings)
+        occurrences.append(_Occurrence(spec=candidate, field_bindings=bindings))
+        expanded_parts.append(f"(?:{candidate_expanded})")
+        variants.append((candidate, bindings))
+    if len(expanded_parts) == 1:
+        return candidate_expanded, variants
+    return f"(?:{'|'.join(expanded_parts)})", variants
 
 
 def _expand_field_pattern(
@@ -175,8 +195,9 @@ def _expand_field_pattern(
         spec = registry._by_token.get(name)
         if spec is None:
             return match.group(0)
-        expanded, bindings = _expand_token(spec, registry, name_gen, occurrences)
-        nested.append(_NestedBinding(spec=spec, field_bindings=bindings))
+        expanded, variants = _expand_token(spec, registry, name_gen, occurrences)
+        for variant_spec, bindings in variants:
+            nested.append(_NestedBinding(spec=variant_spec, field_bindings=bindings))
         return f"(?:{expanded})"
 
     expanded = _PLACEHOLDER_RE.sub(replace, pattern)
@@ -197,6 +218,17 @@ def _expand_spec(
             token_spec = registry._by_token.get(name)
             if token_spec is None:
                 return match.group(0)
+            if token_spec.cls is spec.cls:
+                return match.group(0)
+            if issubclass(spec.cls, token_spec.cls):
+                expanded, inherited_bindings = _expand_spec(
+                    token_spec, registry, name_gen, occurrences
+                )
+                for field_name, binding in inherited_bindings.items():
+                    current = bindings.setdefault(field_name, _FieldBinding())
+                    current.groups.extend(binding.groups)
+                    current.nested.extend(binding.nested)
+                return f"(?:{expanded})"
             expanded, _ = _expand_token(token_spec, registry, name_gen, occurrences)
             return f"(?:{expanded})"
         field_pattern = spec.fields[name]
@@ -307,12 +339,14 @@ class _ReclassMatch:
             raise IndexError("Index is 1-based and must be >= 1.")
         count = 0
         for occ in self._occurrences:
-            if occ.spec.cls is cls:
-                count += 1
-                if count == index:
-                    return _build_from_bindings(
-                        self._match, occ.spec, occ.field_bindings
-                    )
+            if not issubclass(occ.spec.cls, cls):
+                continue
+            value = _build_from_bindings(self._match, occ.spec, occ.field_bindings)
+            if value is None:
+                continue
+            count += 1
+            if count == index:
+                return value
         raise IndexError("No such occurrence for the requested class.")
 
 
@@ -390,7 +424,18 @@ class Builder:
             )
         resolved_fields = dict(fields)
         missing_fields = []
+        base_specs = [
+            self._by_class[base]
+            for base in cls.__mro__[1:]
+            if base in self._by_class
+        ]
         for field in dataclass_fields_info:
+            if field.name in resolved_fields:
+                continue
+            for base_spec in base_specs:
+                if field.name in base_spec.fields:
+                    resolved_fields[field.name] = base_spec.fields[field.name]
+                    break
             if field.name in resolved_fields:
                 continue
             inferred_type = _unwrap_type(field.type)

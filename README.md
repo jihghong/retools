@@ -121,6 +121,38 @@ vacation_rx = reclass.compile(
 )
 ```
 
+## Inheritance and polymorphism
+
+If you register a base dataclass and its subclasses, `<Base>` will match any
+registered subclass of `Base` (polymorphism). Use `<Subclass>` to match a
+specific subclass.
+
+```python
+@reclass(r"<x>, <y>")
+@dataclass
+class Pair:
+    x: int
+    y: int
+
+@reclass(r"x=<x>, y=<y>")
+@dataclass
+class Coordinate(Pair):
+    pass
+
+@reclass(r"<x> \+ <y> i")
+@dataclass
+class Complex(Pair):
+    pass
+
+m = reclass.match(r"<Pair>", "x=1, y=2")
+if m:
+    print(m.get(Pair, 1))  # Coordinate(...)
+
+m = reclass.match(r"<Pair>", "1 + 2 i")
+if m:
+    print(m.get(Pair, 1))  # Complex(...)
+```
+
 ## Optional segments
 
 Optional tokens work as expected; when a token is missing entirely, `get()`
