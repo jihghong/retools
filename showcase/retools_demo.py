@@ -1,4 +1,4 @@
-from retools import reclass
+from retools import Builder, reclass
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
@@ -25,14 +25,19 @@ class To:
     direction: str
 
 rx = reclass.compile(r"<DATE> <To> <DATE>")
-
-if rx.match('2025-12-29 to 2026/01/01'):
-    date1 = rx.get(Date, 1)
+m = rx.match("2025-12-29 to 2026/01/01")
+if m:
+    date1 = m.get(Date, 1)
     print(f"date1 = Date({type(date1.year).__name__}({date1.year}), {type(date1.month).__name__}({date1.month}), {type(date1.date).__name__}({date1.date}))")
-    direction = rx.get(To, 1)
+    direction = m.get(To, 1)
     print(f"{direction.direction = !r}")
-    date2 = rx.get(Date, 2)
+    date2 = m.get(Date, 2)
     print(f"date2 = Date({type(date2.year).__name__}({date2.year}), {type(date2.month).__name__}({date2.month}), {type(date2.date).__name__}({date2.date}))")
+
+m = reclass.match(r"<DATE> <To> <DATE>", "2026-01-01 down to 2025/12/29")
+if m:
+    direction = m.get(To, 1)
+    print(f"{direction.direction = !r}")
 
 
 @reclass(
@@ -47,12 +52,12 @@ class Period:
 vacation_rx = reclass.compile(
     r"summer vacation is <Period> and winter vacation is <Period>"
 )
-
-if vacation_rx.match(
+m = vacation_rx.match(
     "summer vacation is 2025-06-01 to 2025/08/31 and winter vacation is 2025-12-20 to 2026/01/05"
-):
-    summer_vacation = vacation_rx.get(Period, 1)
-    winter_vacation = vacation_rx.get(Period, 2)
+)
+if m:
+    summer_vacation = m.get(Period, 1)
+    winter_vacation = m.get(Period, 2)
     print(f"{summer_vacation = !r}")
     print(f"{winter_vacation = !r}")
 
@@ -83,8 +88,9 @@ profile_text = (
     "height=1.75; member=true; balance=1234.50; born=1990-05-12; "
     "login=2025-01-02 03:04:05; alarm=07:30:00"
 )
-if profile_rx.match(profile_text):
-    profile = profile_rx.get(Profile, 1)
+m = profile_rx.match(profile_text)
+if m:
+    profile = m.get(Profile, 1)
     print(f"{profile = !r}")
 
 
@@ -99,9 +105,50 @@ class Delivery:
 
 
 delivery_rx = reclass.compile(r"<Delivery>")
-if delivery_rx.match("order 42 shipped 2025-01-02 03:04:05"):
-    delivery = delivery_rx.get(Delivery, 1)
+m = delivery_rx.match("order 42 shipped 2025-01-02 03:04:05")
+if m:
+    delivery = m.get(Delivery, 1)
     print(f"{delivery = !r}")
-if delivery_rx.match("order 43 shipped 2025-01-03 04:05:06 delivered 2025-01-05 07:08:09"):
-    delivery = delivery_rx.get(Delivery, 1)
+m = delivery_rx.match("order 43 shipped 2025-01-03 04:05:06 delivered 2025-01-05 07:08:09")
+if m:
+    delivery = m.get(Delivery, 1)
     print(f"{delivery = !r}")
+
+
+@dataclass
+class TripDate:
+    year: int
+    month: int
+    date: int
+
+
+@dataclass
+class TripPeriod:
+    from_date: TripDate
+    to_date: TripDate
+
+
+travel = Builder()
+billing = Builder()
+
+travel.reclass(TripDate, r"<year>/<month>/<date>")
+travel.reclass(TripPeriod, r"<from_date> to <to_date>")
+
+billing.reclass(TripDate, r"<year>-<month>-<date>")
+billing.reclass(TripPeriod, r"<from_date> to <to_date>")
+
+m = travel.match(
+    r"summer vacation is <TripPeriod>",
+    "summer vacation is 2025/06/01 to 2025/08/31",
+)
+if m:
+    trip = m.get(TripPeriod, 1)
+    print(f"{trip = !r}")
+
+m = billing.match(
+    r"summer vacation is <TripPeriod>",
+    "summer vacation is 2025-06-01 to 2025-08-31",
+)
+if m:
+    trip = m.get(TripPeriod, 1)
+    print(f"{trip = !r}")

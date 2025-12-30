@@ -39,12 +39,16 @@ class To:
     direction: str
 
 rx = reclass.compile(r"<DATE> <To> <DATE>")
-
-if rx.match("2025-12-29 to 2026/01/01"):
-    date1 = rx.get(Date, 1)
-    direction = rx.get(To, 1)
-    date2 = rx.get(Date, 2)
+m = rx.match("2025-12-29 to 2026/01/01")
+if m:
+    date1 = m.get(Date, 1)
+    direction = m.get(To, 1)
+    date2 = m.get(Date, 2)
     print(date1, direction, date2)
+
+m = reclass.match(r"<DATE> <To> <DATE>", "2026-01-01 down to 2025/12/29")
+if m:
+    print(m.get(To, 1))
 ```
 
 ## Placeholder syntax
@@ -76,6 +80,24 @@ Built-in defaults:
 
 If you provide `fields=...`, your patterns override the defaults.
 
+## Multiple builders
+
+Use `Builder()` when you want isolated registries with different grammars.
+
+```python
+from retools import Builder
+
+travel = Builder()
+billing = Builder()
+
+travel.reclass(Date, r"<year>/<month>/<date>")
+billing.reclass(Date, r"<year>-<month>-<date>")
+
+m = travel.match(r"depart on <Date>", "depart on 2025/06/01")
+if m:
+    print(m.get(Date, 1))
+```
+
 ## Nested dataclasses
 
 If a field type is another registered dataclass, it can be omitted from
@@ -106,8 +128,7 @@ returns `None` if the target dataclass is wrapped in an optional segment.
 
 ```python
 @reclass(
-    token="DELIVERY",
-    regex=r"order <order_id> shipped <shipped_at>(?: delivered <delivered_at>)?",
+    r"order <order_id> shipped <shipped_at>(?: delivered <delivered_at>)?",
 )
 @dataclass
 class Delivery:
@@ -117,6 +138,8 @@ class Delivery:
 ```
 
 ## API
+
+`reclass` is the default `Builder` instance.
 
 `reclass(regex=None, *, fields=None, token=None)` registers a dataclass.
 
@@ -137,5 +160,8 @@ class Date:
 
 `reclass.compile(pattern, flags=0)` returns a compiled matcher:
 
-- `match(text)` runs `re.match` and stores the last match.
-- `get(Class, index=1)` returns the Nth occurrence of a token as an instance.
+- `match(text)` returns a match object (or `None`).
+- The match object has `get(Class, index=1)` which returns the Nth occurrence.
+
+`reclass.match(pattern, text, flags=0)` is a convenience that compiles (with
+cache) and matches in one call.

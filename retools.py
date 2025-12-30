@@ -152,7 +152,7 @@ def _convert_value(value: str | None, field_type: Any) -> Any:
 
 def _expand_token(
     spec: _Spec,
-    registry: "_ReclassRegistry",
+    registry: "Builder",
     name_gen: _NameGenerator,
     occurrences: list["_Occurrence"],
 ) -> tuple[str, dict[str, _FieldBinding]]:
@@ -164,7 +164,7 @@ def _expand_token(
 
 def _expand_field_pattern(
     pattern: str,
-    registry: "_ReclassRegistry",
+    registry: "Builder",
     name_gen: _NameGenerator,
     occurrences: list["_Occurrence"],
 ) -> tuple[str, list[_NestedBinding]]:
@@ -185,7 +185,7 @@ def _expand_field_pattern(
 
 def _expand_spec(
     spec: _Spec,
-    registry: "_ReclassRegistry",
+    registry: "Builder",
     name_gen: _NameGenerator,
     occurrences: list["_Occurrence"],
 ) -> tuple[str, dict[str, _FieldBinding]]:
@@ -246,19 +246,63 @@ def _allows_none(field_type: Any) -> bool:
     return False
 
 
-class _ReclassRegex:
-    def __init__(self, compiled: re.Pattern[str], occurrences: list[_Occurrence]) -> None:
-        self._compiled = compiled
-        self._occurrences = occurrences
-        self._last_match: re.Match[str] | None = None
+def _build_from_bindings(
+    match: re.Match[str],
+    spec: _Spec,
+    bindings: dict[str, _FieldBinding],
+) -> Any:
+    values: dict[str, Any] = {}
+    group_names = _binding_group_names(bindings)
+    if group_names and all(match.group(name) is None for name in group_names):
+        return None
+    for field in spec.dataclass_fields:
+        binding = bindings.get(field.name)
+        value = None
+        if binding is not None:
+            if binding.nested:
+                for nested in binding.nested:
+                    nested_value = _build_from_bindings(
+                        match, nested.spec, nested.field_bindings
+                    )
+                    if nested_value is not None:
+                        value = nested_value
+                        break
+            if value is None and binding.groups:
+                raw = None
+                for group_name in binding.groups:
+                    candidate = match.group(group_name)
+                    if candidate is not None:
+                        raw = candidate
+                        break
+                if raw is not None:
+                    value = _convert_value(raw, field.type)
+        if value is None:
+            if field.default is not MISSING:
+                value = field.default
+            elif field.default_factory is not MISSING:  # type: ignore[comparison-overlap]
+                value = field.default_factory()  # type: ignore[misc]
+            elif _allows_none(field.type):
+                value = None
+            else:
+                raise ValueError(
+                    f"Missing field '{field.name}' for {spec.cls.__name__}."
+                )
+        values[field.name] = value
+    return spec.cls(**values)
 
-    def match(self, text: str) -> re.Match[str] | None:
-        self._last_match = self._compiled.match(text)
-        return self._last_match
+
+class _ReclassMatch:
+    __slots__ = ("_match", "_occurrences")
+
+    def __init__(self, match: re.Match[str], occurrences: list[_Occurrence]) -> None:
+        self._match = match
+        self._occurrences = occurrences
+
+    @property
+    def match(self) -> re.Match[str]:
+        return self._match
 
     def get(self, cls: type, index: int = 1) -> Any:
-        if self._last_match is None:
-            raise ValueError("No successful match to extract from.")
         if index < 1:
             raise IndexError("Index is 1-based and must be >= 1.")
         count = 0
@@ -266,61 +310,29 @@ class _ReclassRegex:
             if occ.spec.cls is cls:
                 count += 1
                 if count == index:
-                    return self._build_instance(occ)
+                    return _build_from_bindings(
+                        self._match, occ.spec, occ.field_bindings
+                    )
         raise IndexError("No such occurrence for the requested class.")
 
-    def _build_instance(self, occ: _Occurrence) -> Any:
-        return self._build_from_bindings(occ.spec, occ.field_bindings)
 
-    def _build_from_bindings(
-        self,
-        spec: _Spec,
-        bindings: dict[str, _FieldBinding],
-    ) -> Any:
-        values: dict[str, Any] = {}
-        group_names = _binding_group_names(bindings)
-        if group_names and all(self._last_match.group(name) is None for name in group_names):
+class _ReclassRegex:
+    def __init__(self, compiled: re.Pattern[str], occurrences: list[_Occurrence]) -> None:
+        self._compiled = compiled
+        self._occurrences = occurrences
+
+    def match(self, text: str) -> _ReclassMatch | None:
+        match = self._compiled.match(text)
+        if match is None:
             return None
-        for field in spec.dataclass_fields:
-            binding = bindings.get(field.name)
-            value = None
-            if binding is not None:
-                if binding.nested:
-                    for nested in binding.nested:
-                        nested_value = self._build_from_bindings(
-                            nested.spec, nested.field_bindings
-                        )
-                        if nested_value is not None:
-                            value = nested_value
-                            break
-                if value is None and binding.groups:
-                    raw = None
-                    for group_name in binding.groups:
-                        candidate = self._last_match.group(group_name)
-                        if candidate is not None:
-                            raw = candidate
-                            break
-                    if raw is not None:
-                        value = _convert_value(raw, field.type)
-            if value is None:
-                if field.default is not MISSING:
-                    value = field.default
-                elif field.default_factory is not MISSING:  # type: ignore[comparison-overlap]
-                    value = field.default_factory()  # type: ignore[misc]
-                elif _allows_none(field.type):
-                    value = None
-                else:
-                    raise ValueError(
-                        f"Missing field '{field.name}' for {spec.cls.__name__}."
-                    )
-            values[field.name] = value
-        return spec.cls(**values)
+        return _ReclassMatch(match, self._occurrences)
 
 
-class _ReclassRegistry:
+class Builder:
     def __init__(self) -> None:
         self._by_token: dict[str, _Spec] = {}
         self._by_class: dict[type, _Spec] = {}
+        self._cache: dict[tuple[str, int], _ReclassRegex] = {}
 
     def __call__(
         self,
@@ -339,6 +351,16 @@ class _ReclassRegistry:
 
             return decorator
         return self._register(cls, token=token, fields=fields, regex=regex)
+
+    def reclass(
+        self,
+        cls: type | str | None = None,
+        regex: str | None = None,
+        *,
+        fields: dict[str, str] | None = None,
+        token: str | None = None,
+    ) -> Any:
+        return self.__call__(cls, regex, fields=fields, token=token)
 
     def _register(
         self,
@@ -402,11 +424,16 @@ class _ReclassRegistry:
         )
         self._by_token[token] = spec
         self._by_class[cls] = spec
+        self._cache.clear()
         return cls
 
     def compile(self, pattern: str, flags: int = 0) -> _ReclassRegex:
         if not isinstance(pattern, str):
             raise TypeError("pattern must be a string.")
+        cache_key = (pattern, flags)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
         patterns: list[str] = [pattern]
         for spec in self._by_class.values():
             patterns.append(spec.regex)
@@ -425,7 +452,13 @@ class _ReclassRegistry:
 
         expanded_pattern = _PLACEHOLDER_RE.sub(replace, pattern)
         compiled = re.compile(expanded_pattern, flags)
-        return _ReclassRegex(compiled=compiled, occurrences=occurrences)
+        result = _ReclassRegex(compiled=compiled, occurrences=occurrences)
+        self._cache[cache_key] = result
+        return result
+
+    def match(self, pattern: str, text: str, flags: int = 0) -> _ReclassMatch | None:
+        compiled = self.compile(pattern, flags)
+        return compiled.match(text)
 
 
-reclass = _ReclassRegistry()
+reclass = Builder()
