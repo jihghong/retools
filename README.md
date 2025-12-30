@@ -58,8 +58,7 @@ if m:
 - Token names are case-sensitive.
 - `<field>` expands to the field pattern inside a dataclass regex template.
 - Only known tokens/fields are expanded. Unknown placeholders are left as-is.
-- Expansion always wraps in a non-capturing group so quantifiers apply to the
-  whole token or field.
+- Placeholders can take regex qualifiers (e.g., `<Date>{1,3}`)
 
 ## Default field patterns
 
@@ -100,8 +99,7 @@ if m:
 
 ## Nested dataclasses
 
-If a field type is another registered dataclass, it can be omitted from
-`fields` and will be inferred using its token.
+If a field type is another registered dataclass, it will be inferred using its token.
 
 ```python
 @reclass(
@@ -118,6 +116,36 @@ You can then compose it in larger patterns:
 ```python
 vacation_rx = reclass.compile(
     r"summer vacation is <Period> and winter vacation is <Period>"
+)
+```
+
+## List fields
+
+`list[T]` fields are supported. By default, items are separated by commas
+(`\s*,\s*`). When the list segment is present but empty, it becomes `[]`.
+If the list segment is missing entirely, the field is `None` (when optional).
+
+Use `repeat(...)` to customize separators or provide an empty literal:
+
+```python
+from retools import Builder, reclass, repeat
+
+@reclass(r"^<subject>(?:\s+dates\s*=\s*\[<dates>\])?$")
+@dataclass
+class Schedule:
+    subject: str
+    dates: list[Date] | None
+
+calendar = Builder()
+calendar.reclass(
+    Date,
+    r"<year>-<month>-<date>|<year>/<month>/<date>",
+    fields=dict(year=r"\d{4}", month=r"\d{2}", date=r"\d{2}"),
+)
+calendar.reclass(
+    Schedule,
+    r"^<subject>:\s*<dates>$",
+    fields=dict(dates=repeat(empty=r"TBD")),
 )
 ```
 
@@ -175,20 +203,12 @@ class Delivery:
 
 `reclass(regex=None, *, fields=None, token=None)` registers a dataclass.
 
-You can also pass the regex positionally:
-
-```python
-@reclass(r"<year>-<month>-<date>")
-@dataclass
-class Date:
-    year: int
-    month: int
-    date: int
-```
-
 - `regex`: template for the dataclass, using `<field>` placeholders.
 - `fields`: mapping of field name to regex (optional for supported types).
 - `token`: placeholder name used in other patterns (defaults to the class name).
+- `repeat(sep=..., required=False, empty=...)` customizes list fields.
+- `reclass(...).fields(...)` is shorthand for `fields=dict(...)`.
+- `reclass(...).token("NAME")` overrides the default token name.
 
 `reclass.compile(pattern, flags=0)` returns a compiled matcher:
 
@@ -197,6 +217,25 @@ class Date:
 
 `reclass.match(pattern, text, flags=0)` is a convenience that compiles (with
 cache) and matches in one call.
+
+## Chained syntax
+
+You can also chain helpers on the decorator:
+
+```python
+@reclass(r"<subject>:\s*<dates>").fields(dates=repeat(empty='TBD')).token("SCHEDULE")
+@dataclass
+class Schedule:
+    subject: str
+    dates: list[Date]
+```
+
+For a builder, the above code is equivalent to
+
+```python
+calendar = Builder()
+calendar.reclass(r"<subject>:\s*<dates>").fields(dates=repeat(empty='TBD')).token("SCHEDULE")(Schedule)
+```
 
 ## Match helpers
 

@@ -5,11 +5,13 @@ from dataclasses import MISSING, fields as dataclass_fields, is_dataclass
 from datetime import date as _date, datetime as _datetime, time as _time
 from decimal import Decimal
 from types import UnionType
-from typing import Any, Union, get_args, get_origin
+from typing import Any, Union, get_args, get_origin, overload, TypeVar
 from uuid import UUID
 
 _PLACEHOLDER_RE = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>")
 _GROUP_NAME_RE = re.compile(r"\(\?P<([A-Za-z][A-Za-z0-9_]*)>")
+
+T = TypeVar("T")
 
 _TYPE_PATTERNS: list[tuple[type, str]] = [
     (bool, r"(?i:true|false|1|0)"),
@@ -33,22 +35,53 @@ _TYPE_CONVERTERS: dict[type, Any] = {
 }
 
 
+class RepeatSpec:
+    __slots__ = ("sep", "required", "empty")
+
+    def __init__(
+        self,
+        sep: str | None = None,
+        required: bool | None = None,
+        empty: str | None = None,
+    ) -> None:
+        self.sep = r"\s*,\s*" if sep is None else sep
+        self.required = False if required is None else required
+        self.empty = empty
+
+
+def repeat(
+    *, sep: str | None = None, required: bool | None = None, empty: str | None = None
+) -> RepeatSpec:
+    return RepeatSpec(sep=sep, required=required, empty=empty)
+
+
 class _Spec:
-    __slots__ = ("cls", "token", "fields", "regex", "dataclass_fields")
+    __slots__ = (
+        "cls",
+        "token",
+        "fields",
+        "regex",
+        "dataclass_fields",
+        "field_map",
+        "registry",
+    )
 
     def __init__(
         self,
         cls: type,
         token: str,
-        fields: dict[str, str],
+        fields: dict[str, str | RepeatSpec],
         regex: str,
         dataclass_fields_info: tuple,
+        registry: "Builder",
     ) -> None:
         self.cls = cls
         self.token = token
         self.fields = fields
         self.regex = regex
         self.dataclass_fields = dataclass_fields_info
+        self.field_map = {field.name: field for field in dataclass_fields_info}
+        self.registry = registry
 
 
 class _FieldBinding:
@@ -145,6 +178,19 @@ def _unwrap_type(field_type: Any) -> Any:
     return field_type
 
 
+def _list_element_type(field_type: Any) -> Any | None:
+    origin = get_origin(field_type)
+    if origin is Union or origin is UnionType:
+        args = [arg for arg in get_args(field_type) if arg is not type(None)]
+        if len(args) == 1:
+            return _list_element_type(args[0])
+    if origin is list:
+        args = get_args(field_type)
+        if len(args) == 1:
+            return args[0]
+    return None
+
+
 def _default_pattern_for_type(field_type: Any) -> str | None:
     target = _unwrap_type(field_type)
     if target is Any:
@@ -158,6 +204,38 @@ def _default_pattern_for_type(field_type: Any) -> str | None:
         except TypeError:
             continue
     return None
+
+
+def _element_pattern_for_type(element_type: Any, registry: "Builder") -> str | None:
+    target = _unwrap_type(element_type)
+    if target is Any:
+        return _default_pattern_for_type(str)
+    if isinstance(target, type):
+        spec = registry._by_class.get(target)
+        if spec is not None:
+            return _expand_token_inline(spec, registry)
+    return _default_pattern_for_type(target)
+
+
+def _list_pattern_for_field(
+    field: Any, repeat_spec: RepeatSpec, registry: "Builder"
+) -> str:
+    element_type = _list_element_type(field.type)
+    if element_type is None:
+        raise ValueError("repeat can only be used with list fields.")
+    element_pattern = _element_pattern_for_type(element_type, registry)
+    if element_pattern is None:
+        raise ValueError(
+            f"Missing element pattern for list field '{field.name}'."
+        )
+    element_pattern = f"(?:{element_pattern})"
+    list_pattern = f"{element_pattern}(?:{repeat_spec.sep}{element_pattern})*"
+    if repeat_spec.empty is None:
+        if not repeat_spec.required:
+            list_pattern = f"(?:{list_pattern})?"
+    else:
+        list_pattern = f"(?:{list_pattern}|(?:{repeat_spec.empty}))"
+    return list_pattern
 
 
 def _convert_value(value: str | None, field_type: Any) -> Any:
@@ -214,6 +292,65 @@ def _expand_token(
     return f"(?:{'|'.join(expanded_parts)})", variants
 
 
+def _expand_token_inline(spec: _Spec, registry: "Builder") -> str:
+    candidates = [
+        candidate
+        for candidate in registry._by_class.values()
+        if issubclass(candidate.cls, spec.cls)
+    ]
+    if not candidates:
+        candidates = [spec]
+    if len(candidates) > 1:
+        candidates.sort(
+            key=lambda candidate: (-len(candidate.cls.mro()), candidate.cls.__name__)
+        )
+    if len(candidates) == 1:
+        return _expand_spec_inline(candidates[0], registry)
+    expanded_parts = [
+        f"(?:{_expand_spec_inline(candidate, registry)})" for candidate in candidates
+    ]
+    return f"(?:{'|'.join(expanded_parts)})"
+
+
+def _expand_field_pattern_inline(pattern: str, registry: "Builder") -> str:
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        spec = registry._by_token.get(name)
+        if spec is None:
+            return match.group(0)
+        expanded = _expand_token_inline(spec, registry)
+        return f"(?:{expanded})"
+
+    return _PLACEHOLDER_RE.sub(replace, pattern)
+
+
+def _expand_spec_inline(spec: _Spec, registry: "Builder") -> str:
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name in spec.fields:
+            field_pattern = spec.fields[name]
+            if isinstance(field_pattern, RepeatSpec):
+                field_info = spec.field_map[name]
+                list_pattern = _list_pattern_for_field(
+                    field_info, field_pattern, registry
+                )
+                return f"(?:{list_pattern})"
+            expanded = _expand_field_pattern_inline(field_pattern, registry)
+            return f"(?:{expanded})"
+        token_spec = registry._by_token.get(name)
+        if token_spec is None:
+            return match.group(0)
+        if token_spec.cls is spec.cls:
+            return match.group(0)
+        if issubclass(spec.cls, token_spec.cls):
+            expanded = _expand_spec_inline(token_spec, registry)
+            return f"(?:{expanded})"
+        expanded = _expand_token_inline(token_spec, registry)
+        return f"(?:{expanded})"
+
+    return _PLACEHOLDER_RE.sub(replace, spec.regex)
+
+
 def _expand_field_pattern(
     pattern: str,
     registry: "Builder",
@@ -264,6 +401,13 @@ def _expand_spec(
             expanded, _ = _expand_token(token_spec, registry, name_gen, occurrences)
             return f"(?:{expanded})"
         field_pattern = spec.fields[name]
+        if isinstance(field_pattern, RepeatSpec):
+            field_info = spec.field_map[name]
+            list_pattern = _list_pattern_for_field(field_info, field_pattern, registry)
+            binding = bindings.setdefault(name, _FieldBinding())
+            group_name = name_gen.next()
+            binding.groups.append(group_name)
+            return f"(?P<{group_name}>{list_pattern})"
         expanded, nested = _expand_field_pattern(
             field_pattern, registry, name_gen, occurrences
         )
@@ -376,6 +520,39 @@ def _allows_none(field_type: Any) -> bool:
     return False
 
 
+def _parse_element_value(value: str, element_type: Any, registry: "Builder") -> Any:
+    target = _unwrap_type(element_type)
+    if target is Any:
+        return value
+    if isinstance(target, type):
+        spec = registry._by_class.get(target)
+        if spec is not None:
+            match = registry.fullmatch(f"<{spec.token}>", value)
+            if match is None:
+                return value
+            return match.get(target)
+    return _convert_value(value, target)
+
+
+def _parse_list_value(
+    raw: str | None,
+    field: Any,
+    repeat_spec: RepeatSpec,
+    registry: "Builder",
+) -> list[Any] | None:
+    if raw is None:
+        return None
+    if repeat_spec.empty is not None and re.fullmatch(repeat_spec.empty, raw):
+        return []
+    if raw.strip() == "":
+        return [] if not repeat_spec.required else None
+    element_type = _list_element_type(field.type)
+    if element_type is None:
+        return None
+    items = [item for item in re.split(repeat_spec.sep, raw) if item != ""]
+    return [_parse_element_value(item, element_type, registry) for item in items]
+
+
 def _build_from_bindings(
     match: re.Match[str],
     spec: _Spec,
@@ -389,7 +566,14 @@ def _build_from_bindings(
         binding = bindings.get(field.name)
         value = None
         if binding is not None:
-            if binding.nested:
+            pattern_spec = spec.fields.get(field.name)
+            if isinstance(pattern_spec, RepeatSpec):
+                raw = binding.groups[0] if binding.groups else None
+                raw_value = match.group(raw) if raw else None
+                value = _parse_list_value(
+                    raw_value, field, pattern_spec, spec.registry
+                )
+            elif binding.nested:
                 for nested in binding.nested:
                     nested_value = _build_from_bindings(
                         match, nested.spec, nested.field_bindings
@@ -640,36 +824,128 @@ class _ReclassRegex:
         return self._compiled.groupindex
 
 
+class _BuilderConfig:
+    __slots__ = ("_builder", "_regex", "_fields", "_token")
+
+    def __init__(
+        self,
+        builder: "Builder",
+        regex: str | None = None,
+        fields: dict[str, str | RepeatSpec] | None = None,
+        token: str | None = None,
+    ) -> None:
+        self._builder = builder
+        self._regex = regex
+        self._fields = fields
+        self._token = token
+
+    def fields(self, **kwargs: str | RepeatSpec) -> "_BuilderConfig":
+        merged: dict[str, str | RepeatSpec] = {}
+        if self._fields:
+            merged.update(self._fields)
+        merged.update(kwargs)
+        return _BuilderConfig(
+            self._builder, regex=self._regex, fields=merged, token=self._token
+        )
+
+    def token(self, value: str) -> "_BuilderConfig":
+        return _BuilderConfig(
+            self._builder, regex=self._regex, fields=self._fields, token=value
+        )
+
+    def __call__(self, cls: type[T]) -> type[T]:
+        return self._builder._register(
+            cls, token=self._token, fields=self._fields, regex=self._regex
+        )
+
+
 class Builder:
     def __init__(self) -> None:
         self._by_token: dict[str, _Spec] = {}
         self._by_class: dict[type, _Spec] = {}
         self._cache: dict[tuple[str, int], _ReclassRegex] = {}
 
+    @overload
+    def __call__(
+        self,
+        cls: type[T],
+        regex: str | None = None,
+        *,
+        fields: dict[str, str | RepeatSpec] | None = None,
+        token: str | None = None,
+    ) -> type[T]: ...
+
+    @overload
+    def __call__(
+        self,
+        cls: str,
+        regex: None = None,
+        *,
+        fields: dict[str, str | RepeatSpec] | None = None,
+        token: str | None = None,
+    ) -> _BuilderConfig: ...
+
+    @overload
+    def __call__(
+        self,
+        cls: None = None,
+        regex: str | None = None,
+        *,
+        fields: dict[str, str | RepeatSpec] | None = None,
+        token: str | None = None,
+    ) -> _BuilderConfig: ...
+
     def __call__(
         self,
         cls: type | str | None = None,
         regex: str | None = None,
         *,
-        fields: dict[str, str] | None = None,
+        fields: dict[str, str | RepeatSpec] | None = None,
         token: str | None = None,
     ) -> Any:
         if isinstance(cls, str) and regex is None:
             regex = cls
             cls = None
         if cls is None:
-            def decorator(target: type) -> type:
-                return self._register(target, token=token, fields=fields, regex=regex)
-
-            return decorator
+            return _BuilderConfig(self, regex=regex, fields=fields, token=token)
         return self._register(cls, token=token, fields=fields, regex=regex)
+
+    @overload
+    def reclass(
+        self,
+        cls: type[T],
+        regex: str | None = None,
+        *,
+        fields: dict[str, str | RepeatSpec] | None = None,
+        token: str | None = None,
+    ) -> type[T]: ...
+
+    @overload
+    def reclass(
+        self,
+        cls: str,
+        regex: None = None,
+        *,
+        fields: dict[str, str | RepeatSpec] | None = None,
+        token: str | None = None,
+    ) -> _BuilderConfig: ...
+
+    @overload
+    def reclass(
+        self,
+        cls: None = None,
+        regex: str | None = None,
+        *,
+        fields: dict[str, str | RepeatSpec] | None = None,
+        token: str | None = None,
+    ) -> _BuilderConfig: ...
 
     def reclass(
         self,
         cls: type | str | None = None,
         regex: str | None = None,
         *,
-        fields: dict[str, str] | None = None,
+        fields: dict[str, str | RepeatSpec] | None = None,
         token: str | None = None,
     ) -> Any:
         return self.__call__(cls, regex, fields=fields, token=token)
@@ -679,7 +955,7 @@ class Builder:
         cls: type,
         *,
         token: str | None,
-        fields: dict[str, str] | None,
+        fields: dict[str, str | RepeatSpec] | None,
         regex: str | None,
     ) -> type:
         if token is None:
@@ -690,6 +966,11 @@ class Builder:
             fields = {}
         if not isinstance(fields, dict):
             raise ValueError("fields must be a dict.")
+        for name, value in fields.items():
+            if not isinstance(value, (str, RepeatSpec)):
+                raise ValueError(
+                    f"Field pattern for '{name}' must be a string or repeat(...)."
+                )
         if not is_dataclass(cls):
             raise TypeError("reclass can only be applied to dataclasses.")
         dataclass_fields_info = dataclass_fields(cls)
@@ -717,6 +998,10 @@ class Builder:
             if field.name in resolved_fields:
                 continue
             inferred_type = _unwrap_type(field.type)
+            list_element = _list_element_type(field.type)
+            if list_element is not None:
+                resolved_fields[field.name] = RepeatSpec()
+                continue
             nested_spec = self._by_class.get(inferred_type)
             if nested_spec is None:
                 default_pattern = _default_pattern_for_type(field.type)
@@ -726,6 +1011,27 @@ class Builder:
                 resolved_fields[field.name] = default_pattern
             else:
                 resolved_fields[field.name] = f"<{nested_spec.token}>"
+        for field in dataclass_fields_info:
+            pattern_spec = resolved_fields.get(field.name)
+            element_type = _list_element_type(field.type)
+            if element_type is not None and not isinstance(pattern_spec, RepeatSpec):
+                raise ValueError(
+                    f"List field '{field.name}' must use repeat(...)."
+                )
+            if isinstance(pattern_spec, RepeatSpec):
+                if pattern_spec.empty is not None and pattern_spec.required:
+                    raise ValueError(
+                        f"repeat(empty=...) cannot be used with required=True: {field.name}"
+                    )
+                if element_type is None:
+                    raise ValueError(
+                        f"repeat can only be used with list fields: {field.name}"
+                    )
+                element_pattern = _element_pattern_for_type(element_type, self)
+                if element_pattern is None:
+                    raise ValueError(
+                        f"Missing element pattern for list field '{field.name}'."
+                    )
         if missing_fields:
             raise ValueError(
                 f"Missing fields for {cls.__name__}: {', '.join(sorted(missing_fields))}"
@@ -744,6 +1050,7 @@ class Builder:
             fields=resolved_fields,
             regex=regex,
             dataclass_fields_info=tuple(dataclass_fields_info),
+            registry=self,
         )
         self._by_token[token] = spec
         self._by_class[cls] = spec
@@ -760,7 +1067,13 @@ class Builder:
         patterns: list[str] = [pattern]
         for spec in self._by_class.values():
             patterns.append(spec.regex)
-            patterns.extend(spec.fields.values())
+            for field_pattern in spec.fields.values():
+                if isinstance(field_pattern, str):
+                    patterns.append(field_pattern)
+                elif isinstance(field_pattern, RepeatSpec):
+                    patterns.append(field_pattern.sep)
+                    if field_pattern.empty is not None:
+                        patterns.append(field_pattern.empty)
         reserved_names = _collect_named_groups(patterns)
         name_gen = _NameGenerator(reserved_names)
         occurrences: list[_Occurrence] = []

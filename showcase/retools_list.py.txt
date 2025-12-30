@@ -1,0 +1,4 @@
+schedule = Schedule(subject='practice baseball', dates=[Date(year=2025, month=1, date=1), Date(year=2025, month=2, date=2), Date(year=2026, month=3, date=3)])
+schedule = Schedule(subject='practice baseball', dates=[])
+schedule = Schedule(subject='practice baseball', dates=None)
+schedule = Schedule(subject='practice baseball', dates=[])
