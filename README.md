@@ -210,13 +210,20 @@ class Delivery:
 - `reclass(...).fields(...)` is shorthand for `fields=dict(...)`.
 - `reclass(...).token("NAME")` overrides the default token name.
 
-`reclass.compile(pattern, flags=0)` returns a compiled matcher:
+`reclass.compile(pattern, flags=0)` returns a compiled matcher. You can also pass
+the class directly (e.g., `reclass.compile(Date)`), which is shorthand for
+`reclass.compile("<Date>")`.
 
 - `match(text)` returns a match object (or `None`).
 - The match object has `get(Class, index=1)` which returns the Nth occurrence.
 
 `reclass.match(pattern, text, flags=0)` is a convenience that compiles (with
 cache) and matches in one call.
+
+`reclass.construct(Class, text, flags=0)` matches `<Class>` and returns the
+constructed object (or `None`).
+When a matcher is compiled from a class (or a single-token pattern), the compiled matcher
+also provides `construct(text)` which returns the constructed object (or `None`).
 
 ## Chained syntax
 

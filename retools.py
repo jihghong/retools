@@ -731,12 +731,14 @@ class _ReclassRegex:
         user_group_map: list[int],
         user_named_groups: set[str],
         findall_elements: list[tuple[str, Any]],
+        default_spec: _Spec | None,
     ) -> None:
         self._compiled = compiled
         self._occurrences = occurrences
         self._user_group_map = user_group_map
         self._user_named_groups = user_named_groups
         self._findall_elements = findall_elements
+        self._default_spec = default_spec
 
     def match(self, text: str) -> _ReclassMatch | None:
         match = self._compiled.match(text)
@@ -813,6 +815,19 @@ class _ReclassRegex:
 
     def subn(self, repl: str, text: str, count: int = 0) -> tuple[str, int]:
         return self._compiled.subn(repl, text, count)
+
+    def construct(self, text: str) -> Any | None:
+        if self._default_spec is None:
+            raise ValueError(
+                "construct requires a single token pattern; compile a class or <Token> pattern."
+            )
+        match = self.match(text)
+        if match is None:
+            return None
+        try:
+            return match.get(self._default_spec.cls)
+        except IndexError:
+            return None
 
     @property
     def pattern(self) -> str:
@@ -1064,9 +1079,20 @@ class Builder:
         self._cache.clear()
         return cls
 
-    def compile(self, pattern: str, flags: int = 0) -> _ReclassRegex:
+    def compile(self, pattern: str | type[Any], flags: int = 0) -> _ReclassRegex:
+        default_spec: _Spec | None = None
+        if isinstance(pattern, type):
+            spec = self._by_class.get(pattern)
+            if spec is None:
+                raise ValueError(f"class not registered: {pattern.__name__}")
+            default_spec = spec
+            pattern = f"<{spec.token}>"
         if not isinstance(pattern, str):
-            raise TypeError("pattern must be a string.")
+            raise TypeError("pattern must be a string or a registered class.")
+        if default_spec is None:
+            token_match = _PLACEHOLDER_RE.fullmatch(pattern)
+            if token_match:
+                default_spec = self._by_token.get(token_match.group(1))
         cache_key = (pattern, flags)
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -1096,6 +1122,7 @@ class Builder:
             user_group_map=user_group_map,
             user_named_groups=user_named_groups,
             findall_elements=findall_elements,
+            default_spec=default_spec,
         )
         self._cache[cache_key] = result
         return result
@@ -1113,6 +1140,10 @@ class Builder:
     ) -> _ReclassMatch | None:
         compiled = self.compile(pattern, flags)
         return compiled.fullmatch(text)
+
+    def construct(self, cls: type[T], text: str, flags: int = 0) -> T | None:
+        compiled = self.compile(cls, flags)
+        return compiled.construct(text)
 
     def finditer(self, pattern: str, text: str, flags: int = 0) -> list[_ReclassMatch]:
         compiled = self.compile(pattern, flags)

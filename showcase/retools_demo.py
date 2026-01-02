@@ -112,11 +112,13 @@ class Delivery:
     shipped_at: datetime
     delivered_at: datetime | None
 
+delivery = reclass.construct(Delivery, "order 41 shipped 2025-01-01 01:02:03")
+if delivery:
+    print(f"{delivery = !r}")
 
-delivery_rx = reclass.compile(r"<Delivery>")
-m = delivery_rx.match("order 42 shipped 2025-01-02 03:04:05")
-if m:
-    delivery = m.get(Delivery)
+delivery_rx = reclass.compile(Delivery)
+delivery = delivery_rx.construct("order 42 shipped 2025-01-02 03:04:05")
+if delivery:
     print(f"{delivery = !r}")
 
 m = delivery_rx.match("order 43 shipped 2025-01-03 04:05:06 delivered 2025-01-05 07:08:09")
