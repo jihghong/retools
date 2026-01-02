@@ -1,0 +1,2 @@
+'a = 3' -> A(a=3, b='good')
+'value = 7' -> B(value=7, note=None)

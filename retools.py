@@ -424,12 +424,19 @@ def _expand_spec(
 
 
 def _validate_mapping(spec: _Spec, mapping: dict[str, _FieldBinding]) -> None:
-    missing = [
-        f.name
-        for f in spec.dataclass_fields
-        if f.name not in mapping
-        or (not mapping[f.name].groups and not mapping[f.name].nested)
-    ]
+    missing: list[str] = []
+    for field in spec.dataclass_fields:
+        binding = mapping.get(field.name)
+        has_binding = binding is not None and (binding.groups or binding.nested)
+        if has_binding:
+            continue
+        if field.default is not MISSING:
+            continue
+        if field.default_factory is not MISSING:  # type: ignore[comparison-overlap]
+            continue
+        if _allows_none(field.type):
+            continue
+        missing.append(field.name)
     if missing:
         raise ValueError(
             f"Missing fields in regex template for {spec.cls.__name__}: {', '.join(missing)}"
