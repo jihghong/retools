@@ -5,10 +5,10 @@ from dataclasses import MISSING, fields as dataclass_fields, is_dataclass
 from datetime import date as _date, datetime as _datetime, time as _time
 from decimal import Decimal
 from types import UnionType
-from typing import Any, Union, get_args, get_origin, overload, TypeVar
+from typing import Any, Callable, Union, get_args, get_origin, overload, TypeVar
 from uuid import UUID
 
-_PLACEHOLDER_RE = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>")
+_PLACEHOLDER_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _GROUP_NAME_RE = re.compile(r"\(\?P<([A-Za-z][A-Za-z0-9_]*)>")
 
 T = TypeVar("T")
@@ -85,15 +85,17 @@ class _Spec:
 
 
 class _FieldBinding:
-    __slots__ = ("groups", "nested")
+    __slots__ = ("groups", "nested", "constants")
 
     def __init__(
         self,
         groups: list[str] | None = None,
         nested: list["_NestedBinding"] | None = None,
+        constants: dict[str, Any] | None = None,
     ) -> None:
         self.groups = groups or []
         self.nested = nested or []
+        self.constants = constants or {}
 
 
 class _NestedBinding:
@@ -124,6 +126,100 @@ class _NameGenerator:
             if name not in self._reserved:
                 self._reserved.add(name)
                 return name
+
+
+def _read_placeholder_value(pattern: str, start: int) -> tuple[str | None, int | None]:
+    value_chars: list[str] = []
+    i = start
+    length = len(pattern)
+    while i < length:
+        char = pattern[i]
+        if char == "\\" and i + 1 < length:
+            next_char = pattern[i + 1]
+            if next_char in {">", "\\"}:
+                value_chars.append(next_char)
+                i += 2
+                continue
+        if char == ">":
+            return "".join(value_chars), i + 1
+        value_chars.append(char)
+        i += 1
+    return None, None
+
+
+def _parse_placeholder(
+    pattern: str, start: int
+) -> tuple[str, str | None, int] | None:
+    if start >= len(pattern) or pattern[start] != "<":
+        return None
+    match = _PLACEHOLDER_NAME_RE.match(pattern, start + 1)
+    if not match:
+        return None
+    name = match.group(0)
+    idx = match.end()
+    if idx >= len(pattern):
+        return None
+    if pattern[idx] == ">":
+        return name, None, idx + 1
+    if pattern[idx] != "=":
+        return None
+    value, end = _read_placeholder_value(pattern, idx + 1)
+    if end is None:
+        return None
+    return name, value, end
+
+
+def _single_placeholder_name(pattern: str) -> str | None:
+    placeholder = _parse_placeholder(pattern, 0)
+    if placeholder is None:
+        return None
+    name, value, end = placeholder
+    if value is not None or end != len(pattern):
+        return None
+    return name
+
+
+def _replace_placeholders(
+    pattern: str, replace: Callable[[str, str | None], str | None]
+) -> str:
+    parts: list[str] = []
+    i = 0
+    in_class = False
+    length = len(pattern)
+    while i < length:
+        char = pattern[i]
+        if char == "\\":
+            if i + 1 < length:
+                parts.append(pattern[i : i + 2])
+                i += 2
+                continue
+            parts.append(char)
+            i += 1
+            continue
+        if char == "[":
+            in_class = True
+            parts.append(char)
+            i += 1
+            continue
+        if char == "]" and in_class:
+            in_class = False
+            parts.append(char)
+            i += 1
+            continue
+        if not in_class and char == "<":
+            placeholder = _parse_placeholder(pattern, i)
+            if placeholder:
+                name, value, end = placeholder
+                replacement = replace(name, value)
+                if replacement is None:
+                    parts.append(pattern[i:end])
+                else:
+                    parts.append(replacement)
+                i = end
+                continue
+        parts.append(char)
+        i += 1
+    return "".join(parts)
 
 
 def _collect_named_groups(patterns: list[str]) -> set[str]:
@@ -313,22 +409,28 @@ def _expand_token_inline(spec: _Spec, registry: "Builder") -> str:
 
 
 def _expand_field_pattern_inline(pattern: str, registry: "Builder") -> str:
-    def replace(match: re.Match[str]) -> str:
-        name = match.group(1)
+    def replace(name: str, value: str | None) -> str | None:
+        if value is not None:
+            return None
         spec = registry._by_token.get(name)
         if spec is None:
-            return match.group(0)
+            return None
         expanded = _expand_token_inline(spec, registry)
         return f"(?:{expanded})"
 
-    return _PLACEHOLDER_RE.sub(replace, pattern)
+    return _replace_placeholders(pattern, replace)
 
 
 def _expand_spec_inline(spec: _Spec, registry: "Builder") -> str:
-    def replace(match: re.Match[str]) -> str:
-        name = match.group(1)
+    def replace(name: str, value: str | None) -> str | None:
         if name in spec.fields:
             field_pattern = spec.fields[name]
+            if value is not None:
+                if isinstance(field_pattern, RepeatSpec):
+                    raise ValueError(
+                        f"repeat cannot use constant assignment: {spec.cls.__name__}.{name}"
+                    )
+                return "(?:)"
             if isinstance(field_pattern, RepeatSpec):
                 field_info = spec.field_map[name]
                 list_pattern = _list_pattern_for_field(
@@ -337,18 +439,20 @@ def _expand_spec_inline(spec: _Spec, registry: "Builder") -> str:
                 return f"(?:{list_pattern})"
             expanded = _expand_field_pattern_inline(field_pattern, registry)
             return f"(?:{expanded})"
+        if value is not None:
+            return None
         token_spec = registry._by_token.get(name)
         if token_spec is None:
-            return match.group(0)
+            return None
         if token_spec.cls is spec.cls:
-            return match.group(0)
+            return None
         if issubclass(spec.cls, token_spec.cls):
             expanded = _expand_spec_inline(token_spec, registry)
             return f"(?:{expanded})"
         expanded = _expand_token_inline(token_spec, registry)
         return f"(?:{expanded})"
 
-    return _PLACEHOLDER_RE.sub(replace, spec.regex)
+    return _replace_placeholders(spec.regex, replace)
 
 
 def _expand_field_pattern(
@@ -359,17 +463,18 @@ def _expand_field_pattern(
 ) -> tuple[str, list[_NestedBinding]]:
     nested: list[_NestedBinding] = []
 
-    def replace(match: re.Match[str]) -> str:
-        name = match.group(1)
+    def replace(name: str, value: str | None) -> str | None:
+        if value is not None:
+            return None
         spec = registry._by_token.get(name)
         if spec is None:
-            return match.group(0)
+            return None
         expanded, variants = _expand_token(spec, registry, name_gen, occurrences)
         for variant_spec, bindings in variants:
             nested.append(_NestedBinding(spec=variant_spec, field_bindings=bindings))
         return f"(?:{expanded})"
 
-    expanded = _PLACEHOLDER_RE.sub(replace, pattern)
+    expanded = _replace_placeholders(pattern, replace)
     return expanded, nested
 
 
@@ -381,66 +486,68 @@ def _expand_spec(
 ) -> tuple[str, dict[str, _FieldBinding]]:
     bindings: dict[str, _FieldBinding] = {}
 
-    def replace(match: re.Match[str]) -> str:
-        name = match.group(1)
-        if name not in spec.fields:
-            token_spec = registry._by_token.get(name)
-            if token_spec is None:
-                return match.group(0)
-            if token_spec.cls is spec.cls:
-                return match.group(0)
-            if issubclass(spec.cls, token_spec.cls):
-                expanded, inherited_bindings = _expand_spec(
-                    token_spec, registry, name_gen, occurrences
+    def replace(name: str, value: str | None) -> str | None:
+        if name in spec.fields:
+            field_pattern = spec.fields[name]
+            if value is not None:
+                if isinstance(field_pattern, RepeatSpec):
+                    raise ValueError(
+                        f"repeat cannot use constant assignment: {spec.cls.__name__}.{name}"
+                    )
+                field_info = spec.field_map[name]
+                const_value = _parse_constant_value(
+                    value, field_info, field_pattern, registry
                 )
-                for field_name, binding in inherited_bindings.items():
-                    current = bindings.setdefault(field_name, _FieldBinding())
-                    current.groups.extend(binding.groups)
-                    current.nested.extend(binding.nested)
-                return f"(?:{expanded})"
-            expanded, _ = _expand_token(token_spec, registry, name_gen, occurrences)
-            return f"(?:{expanded})"
-        field_pattern = spec.fields[name]
-        if isinstance(field_pattern, RepeatSpec):
-            field_info = spec.field_map[name]
-            list_pattern = _list_pattern_for_field(field_info, field_pattern, registry)
+                binding = bindings.setdefault(name, _FieldBinding())
+                group_name = name_gen.next()
+                binding.groups.append(group_name)
+                binding.constants[group_name] = const_value
+                return f"(?P<{group_name}>)"
+            if isinstance(field_pattern, RepeatSpec):
+                field_info = spec.field_map[name]
+                list_pattern = _list_pattern_for_field(
+                    field_info, field_pattern, registry
+                )
+                binding = bindings.setdefault(name, _FieldBinding())
+                group_name = name_gen.next()
+                binding.groups.append(group_name)
+                return f"(?P<{group_name}>{list_pattern})"
+            expanded, nested = _expand_field_pattern(
+                field_pattern, registry, name_gen, occurrences
+            )
             binding = bindings.setdefault(name, _FieldBinding())
+            if nested:
+                binding.nested.extend(nested)
+                return f"(?:{expanded})"
             group_name = name_gen.next()
             binding.groups.append(group_name)
-            return f"(?P<{group_name}>{list_pattern})"
-        expanded, nested = _expand_field_pattern(
-            field_pattern, registry, name_gen, occurrences
-        )
-        binding = bindings.setdefault(name, _FieldBinding())
-        if nested:
-            binding.nested.extend(nested)
+            return f"(?P<{group_name}>{expanded})"
+        if value is not None:
+            return None
+        token_spec = registry._by_token.get(name)
+        if token_spec is None:
+            return None
+        if token_spec.cls is spec.cls:
+            return None
+        if issubclass(spec.cls, token_spec.cls):
+            expanded, inherited_bindings = _expand_spec(
+                token_spec, registry, name_gen, occurrences
+            )
+            for field_name, binding in inherited_bindings.items():
+                current = bindings.setdefault(field_name, _FieldBinding())
+                current.groups.extend(binding.groups)
+                current.nested.extend(binding.nested)
+                current.constants.update(binding.constants)
             return f"(?:{expanded})"
-        group_name = name_gen.next()
-        binding.groups.append(group_name)
-        return f"(?P<{group_name}>{expanded})"
+        expanded, _ = _expand_token(token_spec, registry, name_gen, occurrences)
+        return f"(?:{expanded})"
 
-    expanded = _PLACEHOLDER_RE.sub(replace, spec.regex)
+    expanded = _replace_placeholders(spec.regex, replace)
     return expanded, bindings
 
 
 def _validate_mapping(spec: _Spec, mapping: dict[str, _FieldBinding]) -> None:
-    missing: list[str] = []
-    for field in spec.dataclass_fields:
-        binding = mapping.get(field.name)
-        has_binding = binding is not None and (binding.groups or binding.nested)
-        if has_binding:
-            continue
-        if field.default is not MISSING:
-            continue
-        if field.default_factory is not MISSING:  # type: ignore[comparison-overlap]
-            continue
-        if _allows_none(field.type):
-            continue
-        missing.append(field.name)
-    if missing:
-        raise ValueError(
-            f"Missing fields in regex template for {spec.cls.__name__}: {', '.join(missing)}"
-        )
+    return None
 
 
 def _expand_pattern_with_user_groups(
@@ -477,19 +584,20 @@ def _expand_pattern_with_user_groups(
             i += 1
             continue
         if not in_class and char == "<":
-            placeholder = _PLACEHOLDER_RE.match(pattern, i)
+            placeholder = _parse_placeholder(pattern, i)
             if placeholder:
-                name = placeholder.group(1)
-                spec = registry._by_token.get(name)
-                if spec is not None:
-                    expanded, variants = _expand_token(
-                        spec, registry, name_gen, occurrences
-                    )
-                    parts.append(f"(?:{expanded})")
-                    group_count += _count_capturing_groups(expanded)
-                    elements.append(("token", variants))
-                    i = placeholder.end()
-                    continue
+                name, value, end = placeholder
+                if value is None:
+                    spec = registry._by_token.get(name)
+                    if spec is not None:
+                        expanded, variants = _expand_token(
+                            spec, registry, name_gen, occurrences
+                        )
+                        parts.append(f"(?:{expanded})")
+                        group_count += _count_capturing_groups(expanded)
+                        elements.append(("token", variants))
+                        i = end
+                        continue
         if not in_class and char == "(":
             if i + 1 < length and pattern[i + 1] == "?":
                 if pattern.startswith("(?P<", i):
@@ -541,6 +649,18 @@ def _parse_element_value(value: str, element_type: Any, registry: "Builder") -> 
     return _convert_value(value, target)
 
 
+def _parse_constant_value(
+    raw: str,
+    field: Any,
+    pattern_spec: str,
+    registry: "Builder",
+) -> Any:
+    expanded = _expand_field_pattern_inline(pattern_spec, registry)
+    if re.fullmatch(expanded, raw) is None:
+        return None
+    return _parse_element_value(raw, field.type, registry)
+
+
 def _parse_list_value(
     raw: str | None,
     field: Any,
@@ -589,25 +709,22 @@ def _build_from_bindings(
                         value = nested_value
                         break
             if value is None and binding.groups:
-                raw = None
                 for group_name in binding.groups:
                     candidate = match.group(group_name)
-                    if candidate is not None:
-                        raw = candidate
-                        break
-                if raw is not None:
-                    value = _convert_value(raw, field.type)
+                    if candidate is None:
+                        continue
+                    if group_name in binding.constants:
+                        value = binding.constants[group_name]
+                    else:
+                        value = _convert_value(candidate, field.type)
+                    break
         if value is None:
             if field.default is not MISSING:
                 value = field.default
             elif field.default_factory is not MISSING:  # type: ignore[comparison-overlap]
                 value = field.default_factory()  # type: ignore[misc]
-            elif _allows_none(field.type):
-                value = None
             else:
-                raise ValueError(
-                    f"Missing field '{field.name}' for {spec.cls.__name__}."
-                )
+                value = None
         values[field.name] = value
     return spec.cls(**values)
 
@@ -1090,9 +1207,9 @@ class Builder:
         if not isinstance(pattern, str):
             raise TypeError("pattern must be a string or a registered class.")
         if default_spec is None:
-            token_match = _PLACEHOLDER_RE.fullmatch(pattern)
-            if token_match:
-                default_spec = self._by_token.get(token_match.group(1))
+            token_name = _single_placeholder_name(pattern)
+            if token_name:
+                default_spec = self._by_token.get(token_name)
         cache_key = (pattern, flags)
         cached = self._cache.get(cache_key)
         if cached is not None:

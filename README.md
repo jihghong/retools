@@ -57,8 +57,62 @@ if m:
 - If you omit `token=...`, the token name defaults to the class name (e.g., `<Date>`).
 - Token names are case-sensitive.
 - `<field>` expands to the field pattern inside a dataclass regex template.
+- `<field=value>` assigns a constant to the field without consuming input. The value is
+  validated against the field regex and converted with the field's converter.
+- Escape `>` as `\>` inside `<field=value>` when you need a literal `>`.
 - Only known tokens/fields are expanded. Unknown placeholders are left as-is.
 - Placeholders can take regex qualifiers (e.g., `<Date>{1,3}`)
+
+## Assignment placeholders
+
+`<field=value>` assigns a constant without consuming any input. The value is validated
+against the field regex (including `fields=...` overrides) and converted using the same
+converter as normal matches. If the value does not match the field regex, the assigned
+value becomes `None`.
+
+Use this to build full objects from a literal token, or to set flags based on which
+branch matched:
+
+```python
+@reclass(r"(?:John<name=John><height=180>|Mary<name=Mary><height=165>)")
+@dataclass
+class Person:
+    name: str
+    height: int
+
+@reclass(r"order <id> (shipped<status=shipped>|cancelled<status=cancelled>)")
+@dataclass
+class Order:
+    id: int
+    status: str
+
+m = reclass.match("<Person>", "Mary")
+print(m.get(Person))  # Person(name='Mary', height=165)
+```
+
+Constants also use built-in converters and can target nested dataclasses:
+
+```python
+@reclass(r"preset<flag=true><count=42><when=2026-01-02 03:04:05>")
+@dataclass
+class Preset:
+    flag: bool
+    count: int
+    when: datetime
+
+@reclass(r"<x>,<y>")
+@dataclass
+class Point:
+    x: int
+    y: int
+
+@reclass(r"box<origin=1,2>")
+@dataclass
+class Box:
+    origin: Point
+```
+
+Escape `>` inside a constant with `\>` (e.g., `<text=3 \> 2>`).
 
 ## Default field patterns
 
