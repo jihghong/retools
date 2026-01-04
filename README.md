@@ -114,6 +114,35 @@ class Box:
 
 Escape `>` inside a constant with `\>` (e.g., `<text=3 \> 2>`).
 
+## Aliases
+
+Aliases let you define reusable regex fragments that are not tied to a dataclass field.
+They can still reference fields (e.g., `<min>`, `<max>`) when expanded inside a class.
+
+There are two scopes:
+
+- Builder-level aliases: shared across all classes in the builder.
+- Class-level aliases: defined on a class and used only within that class.
+
+Expansion order is: `field` → `token` → `class alias` → `builder alias` → literal.
+
+```python
+rules = Builder()
+rules.aliases(range=r"(?:min <min>|max <max>)(?:\s+(?:min <min>|max <max>))*")
+
+@rules.reclass(r"temperature <range>")
+@dataclass
+class TemperatureRange:
+    min: int | None = None
+    max: int | None = None
+
+@rules.reclass(r"budget <range>").aliases(range=r"from <min> to <max>")
+@dataclass
+class BudgetRange:
+    min: int
+    max: int
+```
+
 ## Default field patterns
 
 You can omit `fields` when a dataclass field type has a built-in pattern.
@@ -263,6 +292,8 @@ class Delivery:
 - `repeat(sep=..., required=False, empty=...)` customizes list fields.
 - `reclass(...).fields(...)` is shorthand for `fields=dict(...)`.
 - `reclass(...).token("NAME")` overrides the default token name.
+- `reclass(...).aliases(...)` registers class-local aliases.
+- `reclass.aliases(...)` registers builder-level aliases.
 
 `reclass.compile(pattern, flags=0)` returns a compiled matcher. You can also pass
 the class directly (e.g., `reclass.compile(Date)`), which is shorthand for

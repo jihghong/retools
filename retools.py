@@ -60,6 +60,7 @@ class _Spec:
         "cls",
         "token",
         "fields",
+        "aliases",
         "regex",
         "dataclass_fields",
         "field_map",
@@ -71,6 +72,7 @@ class _Spec:
         cls: type,
         token: str,
         fields: dict[str, str | RepeatSpec],
+        aliases: dict[str, str],
         regex: str,
         dataclass_fields_info: tuple,
         registry: "Builder",
@@ -78,6 +80,7 @@ class _Spec:
         self.cls = cls
         self.token = token
         self.fields = fields
+        self.aliases = aliases
         self.regex = regex
         self.dataclass_fields = dataclass_fields_info
         self.field_map = {field.name: field for field in dataclass_fields_info}
@@ -408,71 +411,127 @@ def _expand_token_inline(spec: _Spec, registry: "Builder") -> str:
     return f"(?:{'|'.join(expanded_parts)})"
 
 
-def _expand_field_pattern_inline(pattern: str, registry: "Builder") -> str:
+def _alias_pattern_for(name: str, spec: _Spec, registry: "Builder") -> str | None:
+    if name in spec.aliases:
+        return spec.aliases[name]
+    return registry._aliases.get(name)
+
+
+def _expand_inline_pattern(
+    pattern: str,
+    spec: _Spec,
+    registry: "Builder",
+    *,
+    allow_field: bool,
+    alias_stack: set[str],
+) -> str:
     def replace(name: str, value: str | None) -> str | None:
         if value is not None:
-            return None
-        spec = registry._by_token.get(name)
-        if spec is None:
-            return None
-        expanded = _expand_token_inline(spec, registry)
-        return f"(?:{expanded})"
-
-    return _replace_placeholders(pattern, replace)
-
-
-def _expand_spec_inline(spec: _Spec, registry: "Builder") -> str:
-    def replace(name: str, value: str | None) -> str | None:
-        if name in spec.fields:
-            field_pattern = spec.fields[name]
-            if value is not None:
+            if allow_field and name in spec.fields:
+                field_pattern = spec.fields[name]
                 if isinstance(field_pattern, RepeatSpec):
                     raise ValueError(
                         f"repeat cannot use constant assignment: {spec.cls.__name__}.{name}"
                     )
                 return "(?:)"
+            return None
+        if allow_field and name in spec.fields:
+            field_pattern = spec.fields[name]
             if isinstance(field_pattern, RepeatSpec):
                 field_info = spec.field_map[name]
                 list_pattern = _list_pattern_for_field(
                     field_info, field_pattern, registry
                 )
                 return f"(?:{list_pattern})"
-            expanded = _expand_field_pattern_inline(field_pattern, registry)
+            expanded = _expand_field_pattern_inline(
+                field_pattern, spec, registry, alias_stack=alias_stack
+            )
             return f"(?:{expanded})"
-        if value is not None:
-            return None
         token_spec = registry._by_token.get(name)
-        if token_spec is None:
-            return None
-        if token_spec.cls is spec.cls:
-            return None
-        if issubclass(spec.cls, token_spec.cls):
-            expanded = _expand_spec_inline(token_spec, registry)
+        if token_spec is not None:
+            if token_spec.cls is spec.cls:
+                return None
+            if issubclass(spec.cls, token_spec.cls):
+                expanded = _expand_spec_inline(token_spec, registry)
+                return f"(?:{expanded})"
+            expanded = _expand_token_inline(token_spec, registry)
             return f"(?:{expanded})"
-        expanded = _expand_token_inline(token_spec, registry)
-        return f"(?:{expanded})"
+        alias_pattern = _alias_pattern_for(name, spec, registry)
+        if alias_pattern is not None:
+            if name in alias_stack:
+                raise ValueError(f"Cyclic alias detected: {name}")
+            alias_stack.add(name)
+            expanded = _expand_inline_pattern(
+                alias_pattern,
+                spec,
+                registry,
+                allow_field=allow_field,
+                alias_stack=alias_stack,
+            )
+            alias_stack.remove(name)
+            return f"(?:{expanded})"
+        return None
 
-    return _replace_placeholders(spec.regex, replace)
+    return _replace_placeholders(pattern, replace)
+
+
+def _expand_field_pattern_inline(
+    pattern: str,
+    spec: _Spec,
+    registry: "Builder",
+    *,
+    alias_stack: set[str],
+) -> str:
+    return _expand_inline_pattern(
+        pattern, spec, registry, allow_field=False, alias_stack=alias_stack
+    )
+
+
+def _expand_spec_inline(spec: _Spec, registry: "Builder") -> str:
+    return _expand_inline_pattern(
+        spec.regex, spec, registry, allow_field=True, alias_stack=set()
+    )
 
 
 def _expand_field_pattern(
     pattern: str,
+    spec: _Spec,
     registry: "Builder",
     name_gen: _NameGenerator,
     occurrences: list["_Occurrence"],
+    *,
+    alias_stack: set[str],
 ) -> tuple[str, list[_NestedBinding]]:
     nested: list[_NestedBinding] = []
 
     def replace(name: str, value: str | None) -> str | None:
         if value is not None:
             return None
-        spec = registry._by_token.get(name)
-        if spec is None:
-            return None
-        expanded, variants = _expand_token(spec, registry, name_gen, occurrences)
-        for variant_spec, bindings in variants:
-            nested.append(_NestedBinding(spec=variant_spec, field_bindings=bindings))
-        return f"(?:{expanded})"
+        token_spec = registry._by_token.get(name)
+        if token_spec is not None:
+            expanded, variants = _expand_token(
+                token_spec, registry, name_gen, occurrences
+            )
+            for variant_spec, bindings in variants:
+                nested.append(_NestedBinding(spec=variant_spec, field_bindings=bindings))
+            return f"(?:{expanded})"
+        alias_pattern = _alias_pattern_for(name, spec, registry)
+        if alias_pattern is not None:
+            if name in alias_stack:
+                raise ValueError(f"Cyclic alias detected: {name}")
+            alias_stack.add(name)
+            expanded, alias_nested = _expand_field_pattern(
+                alias_pattern,
+                spec,
+                registry,
+                name_gen,
+                occurrences,
+                alias_stack=alias_stack,
+            )
+            alias_stack.remove(name)
+            nested.extend(alias_nested)
+            return f"(?:{expanded})"
+        return None
 
     expanded = _replace_placeholders(pattern, replace)
     return expanded, nested
@@ -485,6 +544,7 @@ def _expand_spec(
     occurrences: list["_Occurrence"],
 ) -> tuple[str, dict[str, _FieldBinding]]:
     bindings: dict[str, _FieldBinding] = {}
+    alias_stack: set[str] = set()
 
     def replace(name: str, value: str | None) -> str | None:
         if name in spec.fields:
@@ -493,10 +553,10 @@ def _expand_spec(
                 if isinstance(field_pattern, RepeatSpec):
                     raise ValueError(
                         f"repeat cannot use constant assignment: {spec.cls.__name__}.{name}"
-                    )
+                )
                 field_info = spec.field_map[name]
                 const_value = _parse_constant_value(
-                    value, field_info, field_pattern, registry
+                    value, field_info, field_pattern, spec, registry
                 )
                 binding = bindings.setdefault(name, _FieldBinding())
                 group_name = name_gen.next()
@@ -513,7 +573,12 @@ def _expand_spec(
                 binding.groups.append(group_name)
                 return f"(?P<{group_name}>{list_pattern})"
             expanded, nested = _expand_field_pattern(
-                field_pattern, registry, name_gen, occurrences
+                field_pattern,
+                spec,
+                registry,
+                name_gen,
+                occurrences,
+                alias_stack=alias_stack,
             )
             binding = bindings.setdefault(name, _FieldBinding())
             if nested:
@@ -526,7 +591,15 @@ def _expand_spec(
             return None
         token_spec = registry._by_token.get(name)
         if token_spec is None:
-            return None
+            alias_pattern = _alias_pattern_for(name, spec, registry)
+            if alias_pattern is None:
+                return None
+            if name in alias_stack:
+                raise ValueError(f"Cyclic alias detected: {name}")
+            alias_stack.add(name)
+            expanded = _replace_placeholders(alias_pattern, replace)
+            alias_stack.remove(name)
+            return f"(?:{expanded})"
         if token_spec.cls is spec.cls:
             return None
         if issubclass(spec.cls, token_spec.cls):
@@ -556,6 +629,65 @@ def _expand_pattern_with_user_groups(
     name_gen: _NameGenerator,
     occurrences: list["_Occurrence"],
 ) -> tuple[str, list[int], list[tuple[str, Any]]]:
+    def expand_alias(
+        alias_pattern: str, alias_stack: set[str]
+    ) -> tuple[str, list[tuple[str, Any]]]:
+        parts: list[str] = []
+        elements: list[tuple[str, Any]] = []
+        i = 0
+        in_class = False
+        length = len(alias_pattern)
+        while i < length:
+            char = alias_pattern[i]
+            if char == "\\":
+                if i + 1 < length:
+                    parts.append(alias_pattern[i : i + 2])
+                    i += 2
+                    continue
+                parts.append(char)
+                i += 1
+                continue
+            if char == "[":
+                in_class = True
+                parts.append(char)
+                i += 1
+                continue
+            if char == "]" and in_class:
+                in_class = False
+                parts.append(char)
+                i += 1
+                continue
+            if not in_class and char == "<":
+                placeholder = _parse_placeholder(alias_pattern, i)
+                if placeholder:
+                    name, value, end = placeholder
+                    if value is None:
+                        token_spec = registry._by_token.get(name)
+                        if token_spec is not None:
+                            expanded, variants = _expand_token(
+                                token_spec, registry, name_gen, occurrences
+                            )
+                            parts.append(f"(?:{expanded})")
+                            elements.append(("token", variants))
+                            i = end
+                            continue
+                        alias_body = registry._aliases.get(name)
+                        if alias_body is not None:
+                            if name in alias_stack:
+                                raise ValueError(f"Cyclic alias detected: {name}")
+                            alias_stack.add(name)
+                            expanded, alias_elements = expand_alias(
+                                alias_body, alias_stack
+                            )
+                            alias_stack.remove(name)
+                            parts.append(f"(?:{expanded})")
+                            elements.extend(alias_elements)
+                            i = end
+                            continue
+            parts.append(char)
+            i += 1
+        return "".join(parts), elements
+
     parts: list[str] = []
     user_group_map: list[int] = []
     elements: list[tuple[str, Any]] = []
@@ -596,6 +728,16 @@ def _expand_pattern_with_user_groups(
                         parts.append(f"(?:{expanded})")
                         group_count += _count_capturing_groups(expanded)
                         elements.append(("token", variants))
+                        i = end
+                        continue
+                    alias_pattern = registry._aliases.get(name)
+                    if alias_pattern is not None:
+                        expanded, alias_elements = expand_alias(
+                            alias_pattern, {name}
+                        )
+                        parts.append(f"(?:{expanded})")
+                        group_count += _count_capturing_groups(expanded)
+                        elements.extend(alias_elements)
                         i = end
                         continue
         if not in_class and char == "(":
@@ -653,9 +795,12 @@ def _parse_constant_value(
     raw: str,
     field: Any,
     pattern_spec: str,
+    spec: _Spec,
     registry: "Builder",
 ) -> Any:
-    expanded = _expand_field_pattern_inline(pattern_spec, registry)
+    expanded = _expand_field_pattern_inline(
+        pattern_spec, spec, registry, alias_stack=set()
+    )
     if re.fullmatch(expanded, raw) is None:
         return None
     return _parse_element_value(raw, field.type, registry)
@@ -964,18 +1109,20 @@ class _ReclassRegex:
 
 
 class _BuilderConfig:
-    __slots__ = ("_builder", "_regex", "_fields", "_token")
+    __slots__ = ("_builder", "_regex", "_fields", "_aliases", "_token")
 
     def __init__(
         self,
         builder: "Builder",
         regex: str | None = None,
         fields: dict[str, str | RepeatSpec] | None = None,
+        aliases: dict[str, str] | None = None,
         token: str | None = None,
     ) -> None:
         self._builder = builder
         self._regex = regex
         self._fields = fields
+        self._aliases = aliases
         self._token = token
 
     def fields(self, **kwargs: str | RepeatSpec) -> "_BuilderConfig":
@@ -984,17 +1131,42 @@ class _BuilderConfig:
             merged.update(self._fields)
         merged.update(kwargs)
         return _BuilderConfig(
-            self._builder, regex=self._regex, fields=merged, token=self._token
+            self._builder,
+            regex=self._regex,
+            fields=merged,
+            aliases=self._aliases,
+            token=self._token,
         )
 
     def token(self, value: str) -> "_BuilderConfig":
         return _BuilderConfig(
-            self._builder, regex=self._regex, fields=self._fields, token=value
+            self._builder,
+            regex=self._regex,
+            fields=self._fields,
+            aliases=self._aliases,
+            token=value,
+        )
+
+    def aliases(self, **kwargs: str) -> "_BuilderConfig":
+        merged: dict[str, str] = {}
+        if self._aliases:
+            merged.update(self._aliases)
+        merged.update(kwargs)
+        return _BuilderConfig(
+            self._builder,
+            regex=self._regex,
+            fields=self._fields,
+            aliases=merged,
+            token=self._token,
         )
 
     def __call__(self, cls: type[T]) -> type[T]:
         return self._builder._register(
-            cls, token=self._token, fields=self._fields, regex=self._regex
+            cls,
+            token=self._token,
+            fields=self._fields,
+            aliases=self._aliases,
+            regex=self._regex,
         )
 
 
@@ -1002,6 +1174,7 @@ class Builder:
     def __init__(self) -> None:
         self._by_token: dict[str, _Spec] = {}
         self._by_class: dict[type, _Spec] = {}
+        self._aliases: dict[str, str] = {}
         self._cache: dict[tuple[str, int], _ReclassRegex] = {}
 
     @overload
@@ -1046,8 +1219,12 @@ class Builder:
             regex = cls
             cls = None
         if cls is None:
-            return _BuilderConfig(self, regex=regex, fields=fields, token=token)
-        return self._register(cls, token=token, fields=fields, regex=regex)
+            return _BuilderConfig(
+                self, regex=regex, fields=fields, aliases=None, token=token
+            )
+        return self._register(
+            cls, token=token, fields=fields, aliases=None, regex=regex
+        )
 
     @overload
     def reclass(
@@ -1089,12 +1266,23 @@ class Builder:
     ) -> Any:
         return self.__call__(cls, regex, fields=fields, token=token)
 
+    def aliases(self, **kwargs: str) -> "Builder":
+        for name, pattern in kwargs.items():
+            if not isinstance(pattern, str):
+                raise ValueError(f"Alias pattern for '{name}' must be a string.")
+            if _PLACEHOLDER_NAME_RE.fullmatch(name) is None:
+                raise ValueError(f"Alias name must be a valid placeholder: {name}")
+        self._aliases.update(kwargs)
+        self._cache.clear()
+        return self
+
     def _register(
         self,
         cls: type,
         *,
         token: str | None,
         fields: dict[str, str | RepeatSpec] | None,
+        aliases: dict[str, str] | None,
         regex: str | None,
     ) -> type:
         if token is None:
@@ -1110,6 +1298,15 @@ class Builder:
                 raise ValueError(
                     f"Field pattern for '{name}' must be a string or repeat(...)."
                 )
+        if aliases is None:
+            aliases = {}
+        if not isinstance(aliases, dict):
+            raise ValueError("aliases must be a dict.")
+        for name, value in aliases.items():
+            if not isinstance(value, str):
+                raise ValueError(f"Alias pattern for '{name}' must be a string.")
+            if _PLACEHOLDER_NAME_RE.fullmatch(name) is None:
+                raise ValueError(f"Alias name must be a valid placeholder: {name}")
         if not is_dataclass(cls):
             raise TypeError("reclass can only be applied to dataclasses.")
         dataclass_fields_info = dataclass_fields(cls)
@@ -1187,6 +1384,7 @@ class Builder:
             cls=cls,
             token=token,
             fields=resolved_fields,
+            aliases=aliases,
             regex=regex,
             dataclass_fields_info=tuple(dataclass_fields_info),
             registry=self,
@@ -1215,8 +1413,12 @@ class Builder:
         if cached is not None:
             return cached
         patterns: list[str] = [pattern]
+        for alias_pattern in self._aliases.values():
+            patterns.append(alias_pattern)
         for spec in self._by_class.values():
             patterns.append(spec.regex)
+            for alias_pattern in spec.aliases.values():
+                patterns.append(alias_pattern)
             for field_pattern in spec.fields.values():
                 if isinstance(field_pattern, str):
                     patterns.append(field_pattern)

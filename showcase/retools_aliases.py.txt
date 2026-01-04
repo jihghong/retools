@@ -1,0 +1,5 @@
+'temperature min 10 max 28' -> TemperatureRange(min=10, max=28)
+'speed max 120.5 min 40.0' -> SpeedRange(min=40.0, max=120.5)
+'budget from 100 to 300' -> BudgetRange(min=100, max=300)
+'color 12,34,56' -> Color(r=12, g=34, b=56)
+'address Main St / Taipei' -> Address(street='Main St', city='Taipei')
