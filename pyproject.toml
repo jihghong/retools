@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=61.0", "setuptools_scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "retools"
-version = "0.1.0"
+dynamic = ["version"]
 description = "regex to dataclass extraction"
 requires-python = ">=3.8"
 authors = [
@@ -14,3 +14,5 @@ authors = [
 
 [tool.setuptools]
 py-modules = ["retools"]
+
+[tool.setuptools_scm]
