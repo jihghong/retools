@@ -5,20 +5,13 @@ from dataclasses import MISSING, fields as dataclass_fields, is_dataclass
 from datetime import date as _date, datetime as _datetime, time as _time
 from decimal import Decimal
 from types import UnionType
-from typing import Any, Callable, Protocol, Union, get_args, get_origin, overload, TypeVar
+from typing import Any, Callable, Union, get_args, get_origin, overload, TypeVar
 from uuid import UUID
 
 _PLACEHOLDER_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _GROUP_NAME_RE = re.compile(r"\(\?P<([A-Za-z][A-Za-z0-9_]*)>")
 
 T = TypeVar("T")
-
-
-class ReclassConfig(Protocol):
-    def fields(self, **kwargs: str | "RepeatSpec") -> "ReclassConfig": ...
-    def aliases(self, **kwargs: str) -> "ReclassConfig": ...
-    def token(self, value: str) -> "ReclassConfig": ...
-    def __call__(self, cls: type[T]) -> type[T]: ...
 
 _TYPE_PATTERNS: list[tuple[type, str]] = [
     (bool, r"(?i:true|false|1|0)"),
@@ -1202,7 +1195,7 @@ class Builder:
         *,
         fields: dict[str, str | RepeatSpec] | None = None,
         token: str | None = None,
-    ) -> ReclassConfig: ...
+    ) -> _BuilderConfig: ...
 
     @overload
     def __call__(
@@ -1212,7 +1205,7 @@ class Builder:
         *,
         fields: dict[str, str | RepeatSpec] | None = None,
         token: str | None = None,
-    ) -> ReclassConfig: ...
+    ) -> _BuilderConfig: ...
 
     def __call__(
         self,
@@ -1251,7 +1244,7 @@ class Builder:
         *,
         fields: dict[str, str | RepeatSpec] | None = None,
         token: str | None = None,
-    ) -> ReclassConfig: ...
+    ) -> _BuilderConfig: ...
 
     @overload
     def reclass(
@@ -1261,7 +1254,7 @@ class Builder:
         *,
         fields: dict[str, str | RepeatSpec] | None = None,
         token: str | None = None,
-    ) -> ReclassConfig: ...
+    ) -> _BuilderConfig: ...
 
     def reclass(
         self,
