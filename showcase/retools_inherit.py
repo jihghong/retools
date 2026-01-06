@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from retools import reclass
 
-@reclass(r'<x>, <y>')
+@reclass
 @dataclass
 class Pair:
     x: int
@@ -33,23 +33,14 @@ if m:
 class Complex(Pair):
     pass
 
-rx = reclass.compile(r"<Pair>")
+rx = reclass.compile(Pair)
 
-m = rx.match("1, 2")
-if m:
-    pair = m.get(Pair)
+for item in ("x=1, y=2", "x=1, y=2, z=3", "1 + 2i"):
+    pair = rx.construct(item)
     print(f"{pair = !r}")
 
-m = rx.match("x=1, y=2")
-if m:
-    coordinate = m.get(Pair)
-    print(f"{coordinate = !r}")
-
-m = rx.match("1 + 2i")
-if m:
-    complex = m.get(Pair)
-    print(f"{complex = !r}")
-
-text = "1, 2; x=3, y=4; x=5, y=6, z=7; 8 + 9i"
-pairs = reclass.findall(r"<Pair>", text)
+text = "x=3, y=4; x=5, y=6, z=7; 8 + 9i"
+pairs = [m.get(Pair) for m in rx.finditer(text)]
+print(f"{pairs = !r}")
+pairs = rx.findall(text)
 print(f"{pairs = !r}")

@@ -61,6 +61,8 @@ if m:
   validated against the field regex and converted with the field's converter.
 - Escape `>` as `\>` inside `<field=value>` when you need a literal `>`.
 - Only known tokens/fields are expanded. Unknown placeholders are left as-is.
+- Tokens registered without a regex are treated as abstract; they expand to any
+  registered subclasses that have a regex (otherwise they are left as-is).
 - Placeholders can take regex qualifiers (e.g., `<Date>{1,3}`)
 
 ## Assignment placeholders

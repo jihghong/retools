@@ -73,7 +73,7 @@ class _Spec:
         token: str,
         fields: dict[str, str | RepeatSpec],
         aliases: dict[str, str],
-        regex: str,
+        regex: str | None,
         dataclass_fields_info: tuple,
         registry: "Builder",
     ) -> None:
@@ -312,8 +312,18 @@ def _element_pattern_for_type(element_type: Any, registry: "Builder") -> str | N
     if isinstance(target, type):
         spec = registry._by_class.get(target)
         if spec is not None:
+            if not _token_candidates(spec, registry):
+                return None
             return _expand_token_inline(spec, registry)
     return _default_pattern_for_type(target)
+
+
+def _token_candidates(spec: _Spec, registry: "Builder") -> list[_Spec]:
+    return [
+        candidate
+        for candidate in registry._by_class.values()
+        if issubclass(candidate.cls, spec.cls) and candidate.regex is not None
+    ]
 
 
 def _list_pattern_for_field(
@@ -365,13 +375,9 @@ def _expand_token(
     name_gen: _NameGenerator,
     occurrences: list["_Occurrence"],
 ) -> tuple[str, list[tuple[_Spec, dict[str, _FieldBinding]]]]:
-    candidates = [
-        candidate
-        for candidate in registry._by_class.values()
-        if issubclass(candidate.cls, spec.cls)
-    ]
+    candidates = _token_candidates(spec, registry)
     if not candidates:
-        candidates = [spec]
+        return "(?!)", []
     if len(candidates) > 1:
         candidates.sort(
             key=lambda candidate: (-len(candidate.cls.mro()), candidate.cls.__name__)
@@ -392,13 +398,9 @@ def _expand_token(
 
 
 def _expand_token_inline(spec: _Spec, registry: "Builder") -> str:
-    candidates = [
-        candidate
-        for candidate in registry._by_class.values()
-        if issubclass(candidate.cls, spec.cls)
-    ]
+    candidates = _token_candidates(spec, registry)
     if not candidates:
-        candidates = [spec]
+        return "(?!)"
     if len(candidates) > 1:
         candidates.sort(
             key=lambda candidate: (-len(candidate.cls.mro()), candidate.cls.__name__)
@@ -449,9 +451,14 @@ def _expand_inline_pattern(
             return f"(?:{expanded})"
         token_spec = registry._by_token.get(name)
         if token_spec is not None:
+            candidates = _token_candidates(token_spec, registry)
+            if not candidates:
+                return None
             if token_spec.cls is spec.cls:
                 return None
             if issubclass(spec.cls, token_spec.cls):
+                if token_spec.regex is None:
+                    return None
                 expanded = _expand_spec_inline(token_spec, registry)
                 return f"(?:{expanded})"
             expanded = _expand_token_inline(token_spec, registry)
@@ -483,13 +490,23 @@ def _expand_field_pattern_inline(
     alias_stack: set[str],
 ) -> str:
     return _expand_inline_pattern(
-        pattern, spec, registry, allow_field=False, alias_stack=alias_stack
+        pattern,
+        spec,
+        registry,
+        allow_field=False,
+        alias_stack=alias_stack,
     )
 
 
 def _expand_spec_inline(spec: _Spec, registry: "Builder") -> str:
+    if spec.regex is None:
+        raise ValueError(f"regex is required to expand {spec.cls.__name__}.")
     return _expand_inline_pattern(
-        spec.regex, spec, registry, allow_field=True, alias_stack=set()
+        spec.regex,
+        spec,
+        registry,
+        allow_field=True,
+        alias_stack=set(),
     )
 
 
@@ -509,6 +526,8 @@ def _expand_field_pattern(
             return None
         token_spec = registry._by_token.get(name)
         if token_spec is not None:
+            if not _token_candidates(token_spec, registry):
+                return None
             expanded, variants = _expand_token(
                 token_spec, registry, name_gen, occurrences
             )
@@ -600,9 +619,13 @@ def _expand_spec(
             expanded = _replace_placeholders(alias_pattern, replace)
             alias_stack.remove(name)
             return f"(?:{expanded})"
+        if not _token_candidates(token_spec, registry):
+            return None
         if token_spec.cls is spec.cls:
             return None
         if issubclass(spec.cls, token_spec.cls):
+            if token_spec.regex is None:
+                return None
             expanded, inherited_bindings = _expand_spec(
                 token_spec, registry, name_gen, occurrences
             )
@@ -615,6 +638,8 @@ def _expand_spec(
         expanded, _ = _expand_token(token_spec, registry, name_gen, occurrences)
         return f"(?:{expanded})"
 
+    if spec.regex is None:
+        raise ValueError(f"regex is required to expand {spec.cls.__name__}.")
     expanded = _replace_placeholders(spec.regex, replace)
     return expanded, bindings
 
@@ -663,7 +688,7 @@ def _expand_pattern_with_user_groups(
                     name, value, end = placeholder
                     if value is None:
                         token_spec = registry._by_token.get(name)
-                        if token_spec is not None:
+                        if token_spec is not None and _token_candidates(token_spec, registry):
                             expanded, variants = _expand_token(
                                 token_spec, registry, name_gen, occurrences
                             )
@@ -721,7 +746,7 @@ def _expand_pattern_with_user_groups(
                 name, value, end = placeholder
                 if value is None:
                     spec = registry._by_token.get(name)
-                    if spec is not None:
+                    if spec is not None and _token_candidates(spec, registry):
                         expanded, variants = _expand_token(
                             spec, registry, name_gen, occurrences
                         )
@@ -1372,12 +1397,9 @@ class Builder:
             raise ValueError(
                 f"Missing fields for {cls.__name__}: {', '.join(sorted(missing_fields))}"
             )
-        if regex is None:
-            if len(resolved_fields) == 1:
-                only_field = next(iter(resolved_fields))
-                regex = f"<{only_field}>"
-            else:
-                raise ValueError("regex is required when multiple fields are defined.")
+        if regex is None and len(resolved_fields) == 1:
+            only_field = next(iter(resolved_fields))
+            regex = f"<{only_field}>"
         if token in self._by_token and self._by_token[token].cls is not cls:
             raise ValueError(f"token already registered: {token}")
         spec = _Spec(
@@ -1400,6 +1422,8 @@ class Builder:
             spec = self._by_class.get(pattern)
             if spec is None:
                 raise ValueError(f"class not registered: {pattern.__name__}")
+            if not _token_candidates(spec, self):
+                raise ValueError(f"class has no regex: {pattern.__name__}")
             default_spec = spec
             pattern = f"<{spec.token}>"
         if not isinstance(pattern, str):
@@ -1407,7 +1431,9 @@ class Builder:
         if default_spec is None:
             token_name = _single_placeholder_name(pattern)
             if token_name:
-                default_spec = self._by_token.get(token_name)
+                spec = self._by_token.get(token_name)
+                if spec is not None and _token_candidates(spec, self):
+                    default_spec = spec
         cache_key = (pattern, flags)
         cached = self._cache.get(cache_key)
         if cached is not None:
@@ -1416,7 +1442,8 @@ class Builder:
         for alias_pattern in self._aliases.values():
             patterns.append(alias_pattern)
         for spec in self._by_class.values():
-            patterns.append(spec.regex)
+            if spec.regex is not None:
+                patterns.append(spec.regex)
             for alias_pattern in spec.aliases.values():
                 patterns.append(alias_pattern)
             for field_pattern in spec.fields.values():
