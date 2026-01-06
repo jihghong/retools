@@ -182,6 +182,55 @@ def _single_placeholder_name(pattern: str) -> str | None:
     return name
 
 
+def _scan_placeholders(pattern: str) -> list[tuple[str, str | None]]:
+    placeholders: list[tuple[str, str | None]] = []
+    i = 0
+    in_class = False
+    length = len(pattern)
+    while i < length:
+        char = pattern[i]
+        if char == "\\":
+            i += 2
+            continue
+        if char == "[":
+            in_class = True
+            i += 1
+            continue
+        if char == "]" and in_class:
+            in_class = False
+            i += 1
+            continue
+        if not in_class and char == "<":
+            placeholder = _parse_placeholder(pattern, i)
+            if placeholder:
+                name, value, end = placeholder
+                placeholders.append((name, value))
+                i = end
+                continue
+        i += 1
+    return placeholders
+
+
+def _describe_placeholders(pattern: str, registry: "Builder") -> list[str]:
+    descriptions: list[str] = []
+    for name, value in _scan_placeholders(pattern):
+        if value is not None:
+            descriptions.append(f"<{name}={value}>=literal")
+            continue
+        spec = registry._by_token.get(name)
+        if spec is not None:
+            if _token_candidates(spec, registry):
+                descriptions.append(f"<{name}>=token")
+            else:
+                descriptions.append(f"<{name}>=token(no regex)")
+            continue
+        if name in registry._aliases:
+            descriptions.append(f"<{name}>=alias")
+            continue
+        descriptions.append(f"<{name}>=literal")
+    return descriptions
+
+
 def _replace_placeholders(
     pattern: str, replace: Callable[[str, str | None], str | None]
 ) -> str:
@@ -1196,11 +1245,47 @@ class _BuilderConfig:
 
 
 class Builder:
-    def __init__(self) -> None:
+    def __init__(self, debug: bool = False) -> None:
         self._by_token: dict[str, _Spec] = {}
         self._by_class: dict[type, _Spec] = {}
         self._aliases: dict[str, str] = {}
         self._cache: dict[tuple[str, int], _ReclassRegex] = {}
+        self._debug = debug
+
+    def debug(self, enabled: bool = True) -> "Builder":
+        self._debug = enabled
+        return self
+
+    def _debug_report(
+        self,
+        action: str,
+        pattern: str | type[Any],
+        text: str | None,
+        flags: int,
+        compiled: _ReclassRegex,
+    ) -> None:
+        if not self._debug:
+            return
+        if isinstance(pattern, type):
+            spec = self._by_class.get(pattern)
+            pattern_text = f"<{spec.token}>" if spec is not None else pattern.__name__
+            class_name = pattern.__name__
+        else:
+            pattern_text = pattern
+            class_name = None
+        line = f"[reclass debug] {action} pattern={pattern_text!r}"
+        if class_name is not None:
+            line += f" class={class_name}"
+        print(line)
+        placeholders = _describe_placeholders(pattern_text, self)
+        if placeholders:
+            print(f"[reclass debug] placeholders: {', '.join(placeholders)}")
+        print(f"[reclass debug] expanded={compiled.pattern!r}")
+        if flags:
+            print(f"[reclass debug] flags={flags}")
+        if text is not None:
+            print(f"[reclass debug] text={text!r}")
+        print("[reclass debug] result=None")
 
     @overload
     def __call__(
@@ -1475,29 +1560,47 @@ class Builder:
 
     def match(self, pattern: str, text: str, flags: int = 0) -> _ReclassMatch | None:
         compiled = self.compile(pattern, flags)
-        return compiled.match(text)
+        result = compiled.match(text)
+        if result is None:
+            self._debug_report("match", pattern, text, flags, compiled)
+        return result
 
     def search(self, pattern: str, text: str, flags: int = 0) -> _ReclassMatch | None:
         compiled = self.compile(pattern, flags)
-        return compiled.search(text)
+        result = compiled.search(text)
+        if result is None:
+            self._debug_report("search", pattern, text, flags, compiled)
+        return result
 
     def fullmatch(
         self, pattern: str, text: str, flags: int = 0
     ) -> _ReclassMatch | None:
         compiled = self.compile(pattern, flags)
-        return compiled.fullmatch(text)
+        result = compiled.fullmatch(text)
+        if result is None:
+            self._debug_report("fullmatch", pattern, text, flags, compiled)
+        return result
 
     def construct(self, cls: type[T], text: str, flags: int = 0) -> T | None:
         compiled = self.compile(cls, flags)
-        return compiled.construct(text)
+        result = compiled.construct(text)
+        if result is None:
+            self._debug_report("construct", cls, text, flags, compiled)
+        return result
 
     def finditer(self, pattern: str, text: str, flags: int = 0) -> list[_ReclassMatch]:
         compiled = self.compile(pattern, flags)
-        return compiled.finditer(text)
+        results = compiled.finditer(text)
+        if not results:
+            self._debug_report("finditer", pattern, text, flags, compiled)
+        return results
 
     def findall(self, pattern: str, text: str, flags: int = 0) -> list[Any]:
         compiled = self.compile(pattern, flags)
-        return compiled.findall(text)
+        results = compiled.findall(text)
+        if not results:
+            self._debug_report("findall", pattern, text, flags, compiled)
+        return results
 
     def split(self, pattern: str, text: str, maxsplit: int = 0, flags: int = 0) -> list[str]:
         compiled = self.compile(pattern, flags)

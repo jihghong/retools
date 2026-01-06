@@ -1,0 +1,21 @@
+case 1: token typo
+[reclass debug] match pattern='<DATE> to <DAT>'
+[reclass debug] placeholders: <DATE>=token, <DAT>=literal
+[reclass debug] expanded='(?:(?P<reclass_0>\\d{4})-(?P<reclass_1>\\d{2})-(?P<reclass_2>\\d{2})) to <DAT>'
+[reclass debug] text='2025-01-01 to 2025-02-02'
+[reclass debug] result=None
+m = None
+case 2: literal punctuation
+[reclass debug] match pattern='ship <id>: <DATE>'
+[reclass debug] placeholders: <id>=literal, <DATE>=token
+[reclass debug] expanded='ship <id>: (?:(?P<reclass_0>\\d{4})-(?P<reclass_1>\\d{2})-(?P<reclass_2>\\d{2}))'
+[reclass debug] text='ship 12 2025-01-01'
+[reclass debug] result=None
+m = None
+case 3: missing grouping for |
+[reclass debug] match pattern='red|blue <Paint>'
+[reclass debug] placeholders: <Paint>=token
+[reclass debug] expanded='red|blue (?:(?P<reclass_0>red|blue) (?P<reclass_1>\\w+))'
+[reclass debug] text='blue wall'
+[reclass debug] result=None
+m = None

@@ -221,6 +221,21 @@ class Schedule:
     subject: str
     dates: list[Date] | None
 
+## Debugging
+
+Enable debug output for failed matches:
+
+```python
+from retools import Builder, reclass
+
+reclass.debug()
+# or:
+rules = Builder(debug=True)
+```
+
+When enabled, failed `match`/`search`/`fullmatch`/`construct`/`findall`/`finditer`
+print the expanded regex plus placeholder hints.
+
 calendar = Builder()
 calendar.reclass(
     Date,
