@@ -30,3 +30,16 @@ for pattern, text in tests:
         continue
     cls = {"<A>": A, "<B>": B}[pattern]
     print(f"{text!r} -> {m.get(cls)!r}")
+
+
+@reclass(r"(c=<c>)?")
+@dataclass
+class C:
+    c: int = 3
+
+
+empty = reclass.construct(C, "")
+print(f"'' -> {empty!r}")
+
+extra = reclass.construct(C, "c=9 extra")
+print(f"'c=9 extra' -> {extra!r}")

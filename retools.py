@@ -903,10 +903,16 @@ def _build_from_bindings(
     match: re.Match[str],
     spec: _Spec,
     bindings: dict[str, _FieldBinding],
+    *,
+    allow_empty: bool = False,
 ) -> Any:
     values: dict[str, Any] = {}
     group_names = _binding_group_names(bindings)
-    if group_names and all(match.group(name) is None for name in group_names):
+    if (
+        not allow_empty
+        and group_names
+        and all(match.group(name) is None for name in group_names)
+    ):
         return None
     for field in spec.dataclass_fields:
         binding = bindings.get(field.name)
@@ -1157,13 +1163,27 @@ class _ReclassRegex:
             raise ValueError(
                 "construct requires a single token pattern; compile a class or <Token> pattern."
             )
-        match = self.match(text)
+        match = self.fullmatch(text)
         if match is None:
             return None
         try:
             return match.get(self._default_spec.cls)
         except IndexError:
+            pass
+        candidates = [
+            occ
+            for occ in self._occurrences
+            if issubclass(occ.spec.cls, self._default_spec.cls)
+        ]
+        if len(candidates) != 1:
             return None
+        occ = candidates[0]
+        return _build_from_bindings(
+            match.match,
+            occ.spec,
+            occ.field_bindings,
+            allow_empty=True,
+        )
 
     @property
     def pattern(self) -> str:

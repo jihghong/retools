@@ -322,8 +322,8 @@ the class directly (e.g., `reclass.compile(Date)`), which is shorthand for
 `reclass.match(pattern, text, flags=0)` is a convenience that compiles (with
 cache) and matches in one call.
 
-`reclass.construct(Class, text, flags=0)` matches `<Class>` and returns the
-constructed object (or `None`).
+`reclass.construct(Class, text, flags=0)` fullmatches `<Class>` and returns the
+constructed object (or `None`). If a field is not captured, the constructed value will be its default value if provided, or `None` otherwise. This behavior is independent of the dataclass `__init__` signature.
 When a matcher is compiled from a class (or a single-token pattern), the compiled matcher
 also provides `construct(text)` which returns the constructed object (or `None`).
 
